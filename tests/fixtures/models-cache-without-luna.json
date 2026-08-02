@@ -1,0 +1,8 @@
+{
+  "models": [
+    {
+      "slug": "gpt-5.6-sol",
+      "multi_agent_version": "v2"
+    }
+  ]
+}

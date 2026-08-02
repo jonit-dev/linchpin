@@ -1,7 +1,17 @@
+# Local orchestration output
+.linchpin-run/
+reports/
+*.log
+
+# External install-swap staging; never commit backups
+.migration-backup/
+
+# Editor and platform noise
 .DS_Store
+*.swp
 __pycache__/
 *.py[cod]
-*.swp
-.migration-backup/
 evals/results/
 
+# Temporary verification output
+tests/.tmp/

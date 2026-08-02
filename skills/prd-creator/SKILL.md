@@ -9,6 +9,46 @@ You are a **Principal Software Architect**. Your mission: produce an implementat
 
 When this skill activates: `Planning Mode: Principal Architect`
 
+## Contracted PRD output
+
+Read `references/prd-contract.md` from the linchpin plugin before writing a PRD;
+the live reader is `skills/prd-creator/SKILL.md:14`. Validate a candidate with
+`scripts/linchpin.sh contract <prd-path>` before announcing conformance.
+Every generated PRD must declare conformance with this exact front matter at the
+start of the document:
+
+```yaml
+---
+prd_contract: v1
+---
+```
+
+The generated output must also state `Contract conformance: prd_contract: v1`
+in its verification evidence. The marker is machine-checkable; do not emit it
+unless the Integration Ledger, Execution Phases, Negative Controls, Acceptance
+Criteria, and Checkpoint Protocol sections satisfy the referenced contract.
+
+## Intake and execution boundary
+
+Read `references/intake.md` before routing a request. A score of 2 or less is a
+direct-edit request and must not become a PRD. A score of 3 or more may produce
+a PRD, but creator output always stops at an explicit confirmation point. Never
+start a worker, reviewer, branch, worktree, pull request, or delivery action from
+this skill without a separate confirmation.
+
+If intake sends a non-conforming existing PRD here, use **upgrade mode**: retain
+the original artifact for audit, repair it into a new durable artifact with the
+contract marker, parseable `Files (N)` lists, complete ledger, negative controls,
+acceptance criteria, and checkpoint protocol, then return to intake. Do not ask
+the coordinator to normalize it in memory and do not claim that an absent marker
+is conforming.
+
+## Runtime boundary
+
+The role and delegation pins are owned by `references/runtime.md`. This planning
+skill does not select a model or spawn a native checkpoint process. It records
+checkpoint evidence for the manager to review through the runtime contract.
+
 ---
 
 ## The Integration Litmus (read this before anything else)
@@ -77,7 +117,7 @@ COMPLEXITY SCORE (sum all that apply):
 Every PRD carries one table, near the top, with one row per new module,
 exported symbol, gate, or generated artifact. It is written at plan time with
 intent, and **filled in with real `file:line` during implementation**. A row
-still reading `TBD` at phase end means the phase is incomplete.
+still reading `pending` at phase end means the phase is incomplete.
 
 ```markdown
 ## Integration Ledger
@@ -158,6 +198,10 @@ flowchart LR
 
 **Data Changes:** New schemas/migrations, or "None"
 
+The final PRD must include a `## Negative Controls` table that consolidates the
+observed-red control for every gate named in the phase test tables. Keep each
+control tied to the gate it proves; a green-only result is not evidence.
+
 ### 3. Sequence Flow (MEDIUM/HIGH complexity)
 
 ```mermaid
@@ -217,7 +261,7 @@ from the generated shader on both runtimes" is not. Write the second kind.
 ```markdown
 #### Phase N: [Name] - [User-visible outcome in 1 sentence]
 
-**Files (max 5):** — at least one must already exist
+**Files (N):** — `N` is the exact number of entries below, at most 5; at least one must already exist
 
 - `src/path/new.ts` - NEW: what it does
 - `src/path/existing.ts` - EDIT: now calls the above at line ~NN
@@ -255,72 +299,17 @@ from the generated shader on both runtimes" is not. Write the second kind.
 
 After completing each phase, execute the checkpoint review.
 
-### Automated Checkpoint (ALL complexities - ALWAYS REQUIRED)
+### Checkpoint evidence
 
-**Spawn the `prd-work-reviewer` agent** to perform automated review:
+Every phase records the exact commands and their output in the PRD's
+`Verification Evidence` section. Include the Integration Ledger caller census,
+revert check, incumbent check, and one observed-red result for every gate. A
+green-only checkpoint is `UNVERIFIED`.
 
-```
-Use Task tool with:
-- subagent_type: "prd-work-reviewer"
-- prompt: "Review checkpoint for phase [N] of PRD at [prd_path]"
-```
-
-The agent will:
-
-1. Compare implementation against PRD requirements
-2. Run verification commands (`yarn verify`, `yarn test`)
-3. Identify any drift from specifications
-4. Report corrections needed
-
-**Always include the integration audit in the prompt:**
-
-```
-Also audit integration, independent of whether tests pass:
-1. Integration Ledger: is every row filled with a real non-test file:line?
-2. Caller census: grep each new exported symbol — any non-test consumer?
-3. Did this phase edit at least one pre-existing file?
-4. Revert check: if the new code were removed, what pre-existing test or flow
-   would break? If nothing, report FAIL.
-5. Incumbent: is the replaced path deleted or delegating, or is it still live?
-6. Negative controls: was each new gate observed failing? Check for
-   uncollected test files, self-comparisons, and assertions the previous
-   commit already satisfied.
-Report FAIL on any of these even when the full suite is green.
-```
-
-**Continue to next phase only when agent reports PASS.**
-
----
-
-### Manual Checkpoint (HIGH complexity - ADDITIONAL to automated)
-
-For phases requiring manual verification IN ADDITION to automated checks (e.g., visual UI changes, external integrations):
-
-```
-## PHASE [N] COMPLETE - CHECKPOINT
-
-Files changed: [list]
-Tests passing: [yes/no]
-yarn verify: [pass/fail]
-
-**Manual verification needed:**
-1. [ ] [Specific test action → expected result]
-
-Reply "continue" to proceed to Phase [N+1], or report issues.
-```
-
-### When to Add Manual Checkpoint (in addition to automated)
-
-| Scenario                      | Checkpoint Type                |
-| ----------------------------- | ------------------------------ |
-| API/backend changes           | Automated only                 |
-| Database migrations           | Automated only                 |
-| Business logic                | Automated only                 |
-| UI visual changes             | Automated + Manual             |
-| External service integration  | Automated + Manual             |
-| Performance-sensitive changes | Automated + Manual             |
-
-**Automated is ALWAYS required.** Add manual when automated verification alone is insufficient.
+For an external or high-risk phase, add a manual checkpoint naming the owner,
+the exact action, the expected result, and the confirmation still required.
+Creator output stops after writing this evidence; the manager owns any later
+read-only review and execution confirmation.
 
 ---
 
@@ -610,34 +599,11 @@ in the same phase — never log it as follow-up.
 
 ---
 
-## Checkpoint Agent Integration
+## Checkpoint handoff
 
-The `prd-work-reviewer` agent is your automated QA partner. It:
-
-1. **Reads the PRD** to understand requirements
-2. **Analyzes git diff** to see what changed
-3. **Verifies alignment** between implementation and spec
-4. **Runs verification** commands automatically
-5. **Reports drift** with specific corrections
-
-### Spawning the Agent
-
-After completing phase implementation:
-
-```typescript
-// Use Task tool to spawn the reviewer
-Task({
-  subagent_type: 'prd-work-reviewer',
-  prompt: `Review implementation checkpoint.
-    PRD path: docs/PRDs/feature-name.md
-    Phase: 2
-    Summary: Implemented user authentication endpoint`,
-  description: 'Review phase 2 checkpoint',
-});
-```
-
-### Handling Agent Feedback
-
-- **PASS**: Proceed to next phase
-- **NEEDS CORRECTION**: Fix identified issues, re-run checkpoint
-- **BLOCKED**: Escalate to user for manual intervention
+After each phase, record the complete evidence packet named by the Checkpoint
+Protocol: the exact commands, the observed-red result for every gate, caller
+census, revert check, and any remaining blocker. Hand the packet to the manager
+and stop. The manager chooses the single read-only review path described by
+`references/runtime.md`; this skill never starts that process and never chains
+execution automatically.
