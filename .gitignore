@@ -1,0 +1,16 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor settings and swap files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local environment and temporary files
+.env
+.env.*
+!.env.example
+*.tmp
+*.temp
