@@ -62,19 +62,26 @@ exactly the declared number of bullet entries:
 
 The parser accepts `### Phase N:` or `#### Phase N:` headings. A file entry must
 start with `- `, contain one backtick-delimited repository-relative path, and
-declare `NEW`, `EDIT`, or `DELETE`. A missing, extra, malformed, or duplicated
-entry fails conformance. Unparseable lists must never be treated as disjoint.
+declare exactly one of `NEW`, `EDIT`, or `DELETE`. Provenance for a newly
+created file belongs in the description after `NEW`; it is not a fourth file
+kind. A missing, extra, malformed, or duplicated entry fails conformance.
+Unparseable lists must never be treated as disjoint.
 
 ## Negative Controls
 
 The section is a table with one row per gate. Each row names the gate, the
-intentional failure action, and the expected red observation:
+intentional failure action, the expected red observation, and the exact command
+and result that proves the control was observed:
 
 ```markdown
-| Gate | Negative control | Expected red |
-|---|---|---|
-| contract | remove the marker | parser exits non-zero |
+| Gate | Negative control | Expected red | Exact command/result |
+|---|---|---|---|
+| contract | remove the marker | parser exits non-zero | `command: sh tests/contract-conformance.sh`; result: RED observed: removed marker; exit: 1 |
 ```
+
+The fourth column is machine-checked. Its value must contain one exact
+`command: ...`, a `result: RED observed: ...`, and a non-zero `exit: N`. The
+worker report must repeat the exact command string for the same gate.
 
 The creator records the control specification here. During implementation the
 worker and reviewer add observed-red evidence to the review packet in this
@@ -82,9 +89,9 @@ format:
 
 ```markdown
 ## Gate Evidence
-| Gate | Result | Observed-red evidence |
-|---|---|---|
-| contract | PASS | RED observed: removed marker; exit 1 |
+| Gate | Result | Observed-red evidence | Exact command/result |
+|---|---|---|---|
+| contract | PASS | RED observed: removed marker | `command: sh tests/contract-conformance.sh`; result: RED observed: removed marker; exit: 1 |
 ```
 
 `PASS` without an observed-red line is `UNVERIFIED` and cannot deliver. The

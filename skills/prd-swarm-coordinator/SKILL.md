@@ -64,7 +64,12 @@ is a named degradation unless the user explicitly forced the unavailable mode.
 
 ## Contract-preserving worker brief
 
-Generate each brief with `scripts/linchpin.sh brief <prd>`. The brief contains,
+Generate each brief with the resolved lane metadata:
+`scripts/linchpin.sh brief <prd> <lane-id> <lane-mode> <delivery-mode>`.
+Resolve these values before invocation from `.linchpin.toml`, the
+file-intersection group, and delivery capability. With no config file, the
+helper's `brief <prd>` form remains a lane-1/parallel/pr default for direct
+callers; production lanes pass all three resolved values. The brief contains,
 in this order:
 
 1. source PRD path and lane identity;
@@ -73,8 +78,9 @@ in this order:
    caller and Negative control;
 4. the complete Negative Controls table copied verbatim;
 5. the complete Acceptance Criteria and Checkpoint Protocol copied verbatim;
-6. the runtime invocation shape, lane mode, delivery mode, and prohibited
-   actions.
+6. the runtime-derived worker/reviewer invocation shapes, lane mode, delivery
+   mode, and prohibited actions. The model, effort, and mechanism values come
+   only from `references/runtime.md`.
 
 Before launch, compare ledger row ids between source and brief. A missing row,
 caller, or control rejects the brief. The worker must not be asked to infer
@@ -82,7 +88,7 @@ missing acceptance criteria from a summary.
 
 ## Per-group mode selection
 
-Run `scripts/linchpin.sh mode <execution> <prd...>` after all lists parse. It
+Run `scripts/linchpin.sh mode <resolved-execution> [--config-dir <target-repo>] <prd...>` after all lists parse. It
 builds the file-intersection graph and emits one group per connected component:
 
 - disjoint groups use parallel worktrees when worktree creation succeeds;
@@ -90,14 +96,18 @@ builds the file-intersection graph and emits one group per connected component:
 - explicit sequential mode makes all groups sequential;
 - explicit parallel mode fails loudly on intersection or worktree failure;
 - auto mode degrades only the affected group and announces the reason;
+- `max_lanes` is a real concurrency bound; each group reports `active=` and
+  `queued=` lanes when capacity is exceeded;
 - one lane uses the same output, gate, review, and delivery fields as any other
   group and has no special branch.
 
 If `git worktree add` fails or the shared tree cannot be safely stashed, run
-`scripts/linchpin.sh schedule auto fail ...`, announce the sequential fallback
-before starting the first lane, and preserve the same brief and gates. Never
-abort a normal auto run for unavailable isolation. For a forced parallel run,
-fail with the exact capability error so the user can correct the environment.
+`scripts/linchpin.sh schedule auto fail [--config-dir <target-repo>] ...`,
+announce the sequential fallback before starting the first lane, and preserve
+the same brief and gates. The schedule output identifies active and queued
+lanes under `max_lanes`. Never abort a normal auto run for unavailable
+isolation. For a forced parallel run, fail with the exact capability error so
+the user can correct the environment.
 
 Mode is per group. A colliding pair may be sequential while an independent pair
 remains parallel. A worker never receives a weaker gate because its group is
@@ -128,10 +138,15 @@ every control. The evidence format is:
 
 ```markdown
 ## Gate Evidence
-| Gate | Result | Observed-red evidence |
-|---|---|---|
-| gate-id | PASS | RED observed: disabled gate; command exited 1 |
+| Gate | Result | Observed-red evidence | Exact command/result |
+|---|---|---|---|
+| gate-id | PASS | RED observed: disabled gate | `command: sh tests/example.sh`; result: RED observed: disabled gate; exit: 1 |
 ```
+
+The exact command/result cell repeats the command documented in the PRD's
+Negative Controls table. `gate` rejects missing, duplicate, or extra gate ids,
+generic evidence without that exact command, green-only evidence, and zero
+exits.
 
 Run `scripts/linchpin.sh gate <prd> <report>` before delivery. A report with
 only green assertions, a missing control, or a missing observed-red line is
@@ -144,10 +159,15 @@ non-zero result; a verbal claim is not evidence.
 
 ## One review and repair rule
 
-When review is enabled, launch exactly one fresh reviewer per PRD through the
-read-only Sol shape in `references/runtime.md`. Record `review_used: true`
-before launch. The reviewer cannot edit. The manager verifies the final diff and
-closes findings; no second reviewer is started after repair.
+When review is enabled, launch exactly one fresh Sol/medium reviewer per lane
+through this shape, with all role values resolved from `references/runtime.md`:
+
+```text
+codex exec --model <Reviewer.Model> -c 'model_reasoning_effort="<Reviewer.Effort>"' --sandbox read-only -C <lane> <review>
+```
+
+Record `review_used: true` before launch. The reviewer cannot edit. The manager
+closes findings after Luna repair; no second reviewer is started after repair.
 
 When a worker or reviewer exposes a failure, treat it first as specification
 evidence. Before re-delegating, write a corrected or narrowed handoff naming the

@@ -1,7 +1,7 @@
 #!/bin/sh
 . "$(dirname -- "$0")/testlib.sh"
 
-baseline="${IMPORT_BASELINE:-3323e59}"
+baseline="${SOURCE_BASELINE:-3323e59}"
 for path in skills/prd-creator/SKILL.md skills/prd-executor/SKILL.md skills/prd-swarm-coordinator/SKILL.md; do
   case "$path" in
     skills/prd-creator/*|skills/prd-executor/*) source_path="$HOME/.claude/$path" ;;

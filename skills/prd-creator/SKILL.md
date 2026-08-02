@@ -261,7 +261,7 @@ from the generated shader on both runtimes" is not. Write the second kind.
 ```markdown
 #### Phase N: [Name] - [User-visible outcome in 1 sentence]
 
-**Files (N):** — `N` is the exact number of entries below, at most 5; at least one must already exist
+**Files (N):** — `N` is the exact number of entries below, at most 5; at least one must already exist. Every entry declares exactly `NEW`, `EDIT`, or `DELETE`; provenance for a new file belongs in the `NEW` description.
 
 - `src/path/new.ts` - NEW: what it does
 - `src/path/existing.ts` - EDIT: now calls the above at line ~NN
@@ -336,6 +336,18 @@ The goal is **proving things work**, not just "writing tests". Every feature mus
 A gate you have never seen fail is not evidence. Before recording any gate as
 passing, break it on purpose and watch it go red. These are the mechanisms by
 which real gates passed while shipping nothing:
+
+The final `## Negative Controls` table has one exact command/result field per
+gate:
+
+```markdown
+| Gate | Negative control | Expected red | Exact command/result |
+|---|---|---|---|
+| gate-id | disable the gate | command exits non-zero | `command: sh tests/example.sh`; result: RED observed: disabled gate; exit: 1 |
+```
+
+The command string is copied into the review report. A generic phrase such as
+`exit 1` without the documented command is not evidence.
 
 | Silent-pass mechanism | Negative control that catches it |
 |---|---|

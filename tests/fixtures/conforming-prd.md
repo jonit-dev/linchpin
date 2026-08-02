@@ -37,10 +37,10 @@ prd_contract: v1
 
 ## Negative Controls
 
-| Gate | Negative control | Expected red |
-|---|---|---|
-| contract | remove the marker | parser exits non-zero |
-| brief | remove ledger row 2 | brief generation exits non-zero |
+| Gate | Negative control | Expected red | Exact command/result |
+|---|---|---|---|
+| contract | remove the marker | parser exits non-zero | `command: sh tests/contract-conformance.sh`; result: RED observed: removed marker; exit: 1 |
+| brief | remove ledger row 2 | brief generation exits non-zero | `command: sh tests/brief-contains-ledger.sh`; result: RED observed: removed ledger row; exit: 1 |
 
 ## Acceptance Criteria
 

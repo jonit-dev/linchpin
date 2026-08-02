@@ -61,6 +61,11 @@ file paths converge. `delivery = "pr"` degrades to `branch` when a remote or
 the required PR client is unavailable, with an announcement. `review = false`
 is never inferred from a missing service.
 
+The helper resolves `.linchpin.toml` from the target repository directory. For
+isolated helper tests or an explicitly supplied target, set
+`LINCHPIN_CONFIG_DIR=/path/to/repo` or pass `--config-dir /path/to/repo` to
+`route`, `mode`, `schedule`, or `brief`. The file remains optional.
+
 ## Capability preflight
 
 Run preflight before making branches or starting workers:
@@ -90,6 +95,8 @@ sets and partition it into connected lane groups:
 - `execution = "auto"` degrades only the affected group and announces the reason;
 - a one-PRD input still goes through this same grouping, brief, gate, review, and
   delivery sequence; it has no special single-lane shortcut.
+- `max_lanes` is a real active-lane bound. Mode and schedule output name
+  `active=` and `queued=` lanes/groups when the batch exceeds the bound.
 
 The worker brief is identical in both modes. Isolation changes where the worker
 runs, never the contract, gates, model tier, or review packet.
