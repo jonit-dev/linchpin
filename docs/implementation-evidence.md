@@ -1,10 +1,9 @@
 # Implementation evidence for the current linchpin PRD
 
-The authoritative PRD remains at
-`/home/joao/projects/linchpin/docs/PRDs/linchpin-plugin.md` and is not edited by
-this lane. This repository-side evidence fills its Integration Ledger with
-implemented callers. Every caller below is a non-test path; Phase 7 is
-explicitly optional and unbuilt.
+The named PRD is `docs/PRDs/linchpin-plugin.md`; this lane upgraded it in place
+to the `prd_contract: v1` contract. This repository-side evidence records the
+resulting Integration Ledger callers. Every caller below is a non-test path;
+Phase 7 is explicitly optional and unbuilt.
 
 ## Integration Ledger caller census
 
