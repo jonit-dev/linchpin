@@ -14,3 +14,17 @@ Thumbs.db
 !.env.example
 *.tmp
 *.temp
+
+# Local orchestration output
+.linchpin-run/
+reports/
+*.log
+
+# External install-swap staging; never commit backups
+.migration-backup/
+
+# Python and verification noise
+__pycache__/
+*.py[cod]
+evals/results/
+tests/.tmp/

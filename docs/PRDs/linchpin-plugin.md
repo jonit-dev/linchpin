@@ -1,3 +1,7 @@
+---
+prd_contract: v1
+---
+
 # PRD: `linchpin` — Codex PRD swarm plugin
 
 **Complexity: 5 → MEDIUM mode**
@@ -12,9 +16,9 @@
 ## 1. Context
 
 **The goal, stated plainly:** an agent swarm that orchestrates execution of **one or
-many PRDs** through a manager and workers. Manager is `gpt-5.6-sol` at medium.
-Workers are `gpt-5.6-luna` at max. Everything else in this PRD exists to make that
-work reliably, or to stop it from silently not working.
+many PRDs** through the manager, worker, and reviewer roles defined in
+`references/runtime.md`. Everything else in this PRD exists to make that work
+reliably, or to stop it from silently not working.
 
 **Problem:** Four PRD skills exist as loose files linked three different ways; the
 coordinator throws away the structure the creator emits; the one delegation
@@ -39,7 +43,8 @@ mechanism has no fallback when it is unavailable.
 - `prd-executor` is a symlink codex → claude. `prd-swarm-coordinator` and `swarm-coordinator` are symlinks codex → hermes.
 - `prd-swarm-coordinator:23,116` says "read and normalize PRDs" and re-derives an acceptance checklist. It never mentions the Integration Ledger that `prd-creator` mandates.
 - `prd-creator` mandates a negative control per gate; the coordinator invents its own lane gates instead of inheriting them.
-- Model pins (`gpt-5.6-sol`/medium manager, `gpt-5.6-luna`/max worker) are hardcoded inline in ~6 places across two skills.
+- Model and effort pins were duplicated inline across the skills instead of
+  having one runtime owner.
 - Nothing states **why** Luna must run as a subprocess, so a future edit can silently convert it to a native subagent spawn and break every lane.
 - **One PRD and many PRDs are two different skills** with two different delegation mechanisms, for no reason that survives the goal statement above.
 - **Nothing defines what happens on any input that is not already a conforming PRD** — a bare feature request, a trivial request, a non-conforming PRD, a repo with no remote. All undefined today.
@@ -57,22 +62,13 @@ they are not interchangeable:
 | Requires | model has `multi_agent_version: "v2"` | nothing |
 | Luna | **impossible** | works |
 
-From `~/.codex/models_cache.json` on this machine:
+The runtime contract owns the model cache lookup and records that the worker
+role is v1-capable while native spawning requires v2. That is the entire content
+of the "worker is not native-subagent compatible" comment — its implementation
+lane must use the subprocess mechanism from `references/runtime.md`.
 
-| Model | `multi_agent_version` |
-|---|---|
-| gpt-5.6-sol | v2 |
-| gpt-5.6-terra | v2 |
-| **gpt-5.6-luna** | **v1** |
-
-`sol-advisor` pins `sol_advisor_luna_implementer` as a **native v2 custom agent**.
-Luna is v1. That is the entire content of the "luna is not v2 subagent compatible"
-comment — its default implementation lane is built on a spawn mechanism its model
-does not speak.
-
-Our coordinator already uses `codex exec --model gpt-5.6-luna`, so it is correct
-today **by accident of authorship, not by rule**. This PRD makes it a rule with a
-gate. Terra is explicitly rejected on cost; there is no third tier.
+The coordinator's subprocess shape is now correct by contract rather than by
+accident. A third model tier is explicitly rejected on cost.
 
 ### Background: Codex plugins cannot take options
 
@@ -104,9 +100,9 @@ One orchestration model, used for every run:
 
 | Role | Model | Effort | Count | Mechanism | Owns |
 |---|---|---|---|---|---|
-| **Manager** | `gpt-5.6-sol` | medium | 1 per run | the session you are in | intake, worker briefs, review, repair, ledger |
-| **Worker** | `gpt-5.6-luna` | max | 1 per lane | `codex exec` subprocess | one PRD, start to delivery |
-| **Reviewer** | `gpt-5.6-sol` | medium | 1 per lane | `codex exec --sandbox read-only` | lane acceptance against inherited gates |
+| **Manager** | `references/runtime.md` Manager row | current session | 1 per run | current Codex session | intake, worker briefs, review, repair, ledger |
+| **Worker** | `references/runtime.md` Worker row | runtime pin | 1 per lane | `codex exec` subprocess | one PRD, start to delivery |
+| **Reviewer** | `references/runtime.md` Reviewer row | runtime pin | 1 per lane | `codex exec --sandbox read-only` | lane acceptance against inherited gates |
 
 **A single PRD is a swarm of one.** It takes the same path — same manager, same
 brief format, same gates, same review, same ledger. There is no separate
@@ -233,7 +229,7 @@ This is what stops `$linchpin` from hijacking trivial work.
 | Check | On failure |
 |---|---|
 | is a git repo | **refuse**, name it — there is no lane without version control |
-| `$CODEX_HOME/models_cache.json` has `gpt-5.6-luna` | **refuse**, never fall back |
+| `$CODEX_HOME/models_cache.json` has the runtime worker with its required capability | **refuse**, never fall back |
 | `git worktree add` succeeds | → `sequential`, **announce** |
 | working tree clean or stashable | → `sequential`, **announce** |
 | lanes' `Files (N)` sets disjoint | colliding group → `sequential`, **announce** |
@@ -254,22 +250,22 @@ and makes branch delivery a redesign instead of a config value.
 
 | # | New thing | Live caller (`file:line`, non-test) | Replaces | Old path removed? | Negative control |
 |---|-----------|-------------------------------------|----------|-------------------|------------------|
-| 1 | `references/prd-contract.md` | `skills/prd-swarm-coordinator/SKILL.md:TBD` (intake reads it); `skills/prd-creator/SKILL.md:TBD` (declares conformance) | ad-hoc "read and normalize PRDs" at `prd-swarm-coordinator:23,116` | that wording deleted in Phase 1 | delete the contract file → intake has a dangling reference and `verify.sh` fails |
-| 2 | Integration-Ledger transfer into worker brief | `skills/prd-swarm-coordinator/SKILL.md:TBD` (worker-brief section) | coordinator's self-derived checklist | replaced in Phase 1 | a brief that omits ledger rows must be rejected by the intake gate |
-| 3 | Machine-readable `Files (N)` lists | `skills/prd-swarm-coordinator/SKILL.md:TBD` (mode selection) | prose file lists | prose form deleted from the contract in Phase 1 | malform a list → mode selection must fail, not assume disjoint |
-| 4 | `references/intake.md` | `skills/linchpin/SKILL.md:TBD`; `skills/prd-swarm-coordinator/SKILL.md:TBD` | undefined behavior on non-PRD input | n/a (new) | delete it → router has no dispatch rule and `verify.sh` fails |
-| 5 | Unified 1..N execution path | `skills/prd-swarm-coordinator/SKILL.md:TBD` | `skills/prd-executor/SKILL.md` entirely | **skill deleted** in Phase 2 | run a single PRD → must produce the same brief format, gates, and ledger row as a lane in an N-PRD run |
-| 6 | `execution` mode selector + sequential fallback | `skills/prd-swarm-coordinator/SKILL.md:TBD` (pre-spawn scheduling) | unconditional worktree assumption | assumption replaced in Phase 2 | make `git worktree add` fail → must run sequentially **and announce**, never abort |
-| 7 | `.linchpin.toml` reader | `skills/linchpin/SKILL.md:TBD` (intake step) | hardcoded `pr`/worktree/review-on assumptions | inlines replaced in Phase 2 | delete the file → all defaults apply and the run proceeds; make it required → test fails |
-| 8 | Complexity-floor refusal | `skills/linchpin/SKILL.md:TBD` (routing table) | nothing (new guard) | n/a | a score-2 request must be refused, not turned into a PRD |
-| 9 | `prd-creator` upgrade mode | `skills/linchpin/SKILL.md:TBD` (non-conforming branch) | the coordinator's "legacy normalize" fallback | legacy path **deleted** in Phase 2 | feed a non-conforming PRD → must be rewritten to conform, never normalized in-flight |
-| 10 | Inherited negative controls as lane gates | `skills/prd-swarm-coordinator/SKILL.md:TBD` (verification) | coordinator's invented gates | replaced in Phase 3 | a PRD whose gates have no observed-red evidence must fail lane acceptance |
-| 11 | Spec-misclassification repair rule | `skills/prd-swarm-coordinator/SKILL.md:TBD` (retry/repair) | "use a fresh Luna worker in the same worktree" | reworded in Phase 3 | an unchanged re-prompt must be refused by the rule text |
-| 12 | `references/runtime.md` (pins + roles + delegation rule) | all three `SKILL.md` runtime sections | ~6 inline hardcoded pins | inlines replaced by citation in Phase 4 | change a pin in `runtime.md` → skills must not contradict it; `verify.sh` greps for stray inline pins |
-| 13 | `scripts/verify.sh` Luna-safety gate | `.github/workflows/verify.yml:TBD` and local pre-commit | nothing (new guard) | n/a | insert `agent_type: prd_luna_implementer` into a SKILL.md → `verify.sh` must exit non-zero |
-| 14 | `.codex-plugin/plugin.json` + marketplace | `codex plugin add` | the copy in `~/.claude/skills/prd-creator` and symlinks in `~/.codex/skills` | deleted in Phase 6 | uninstall → `prd-creator` is no longer discoverable |
-| 15 | `skills/linchpin/SKILL.md` router | invoked as `$linchpin`; `interface.defaultPrompt` in the manifest | nothing (new entry point) | n/a | invoke `$linchpin` → must dispatch per `intake.md`, not silently no-op |
-| 16 | `scripts/run-status.sh` (Phase 7) | `skills/prd-swarm-coordinator/SKILL.md:TBD` (goal objective) and the user's `/goal` | the goal judge reading a prose summary | n/a — the judge must never grade prose | point the goal at a run with one PARTIAL lane → the loop must continue, not report done |
+| 1 | `references/prd-contract.md` | intake reads it at `skills/prd-swarm-coordinator/SKILL.md:13`; declares conformance at `skills/prd-creator/SKILL.md:14` | ad-hoc "read and normalize PRDs" at `prd-swarm-coordinator:23,116` | that wording deleted in Phase 1 | delete the contract file → intake has a dangling reference and `verify.sh` fails |
+| 2 | Integration-Ledger transfer into worker brief | worker-brief section at `skills/prd-swarm-coordinator/SKILL.md:67` | coordinator's self-derived checklist | replaced in Phase 1 | a brief that omits ledger rows must be rejected by the intake gate |
+| 3 | Machine-readable `Files (N)` lists | `skills/prd-swarm-coordinator/SKILL.md:85` (mode selection); `scripts/linchpin.sh:45` | prose file lists | prose form deleted from the contract in Phase 1 | malform a list → mode selection must fail, not assume disjoint |
+| 4 | `references/intake.md` | `skills/linchpin/SKILL.md:8`; `skills/prd-swarm-coordinator/SKILL.md:42` | undefined behavior on non-PRD input | n/a (new) | delete it → router has no dispatch rule and `verify.sh` fails |
+| 5 | Unified 1..N execution path | `skills/prd-swarm-coordinator/SKILL.md:11` | `skills/prd-executor/SKILL.md` entirely | **skill deleted** in Phase 2 | run a single PRD → must produce the same brief format, gates, and ledger row as a lane in an N-PRD run |
+| 6 | `execution` mode selector + sequential fallback | `scripts/linchpin.sh:273`; `skills/prd-swarm-coordinator/SKILL.md:96` | unconditional worktree assumption | assumption replaced in Phase 2 | make `git worktree add` fail → must run sequentially **and announce**, never abort |
+| 7 | `.linchpin.toml` reader | `scripts/linchpin.sh:202`; `skills/prd-swarm-coordinator/SKILL.md:48` | hardcoded `pr`/worktree/review-on assumptions | inlines replaced in Phase 2 | delete the file → all defaults apply and the run proceeds; make it required → test fails |
+| 8 | Complexity-floor refusal | `skills/linchpin/SKILL.md:27`; `scripts/linchpin.sh:246` | nothing (new guard) | n/a | a score-2 request must be refused, not turned into a PRD |
+| 9 | `prd-creator` upgrade mode | `skills/linchpin/SKILL.md:31`; `skills/prd-creator/SKILL.md:40` | the coordinator's "legacy normalize" fallback | legacy path **deleted** in Phase 2 | feed a non-conforming PRD → must be rewritten to conform, never normalized in-flight |
+| 10 | Inherited negative controls as lane gates | `skills/prd-swarm-coordinator/SKILL.md:123`; `scripts/linchpin.sh:360` | coordinator's invented gates | replaced in Phase 3 | a PRD whose gates have no observed-red evidence must fail lane acceptance |
+| 11 | Spec-misclassification repair rule | `skills/prd-swarm-coordinator/SKILL.md:152` | "use a fresh Luna worker in the same worktree" | reworded in Phase 3 | an unchanged re-prompt must be refused by the rule text |
+| 12 | `references/runtime.md` (pins + roles + delegation rule) | `skills/prd-creator/SKILL.md:49`; `skills/prd-swarm-coordinator/SKILL.md:14`; `skills/linchpin/SKILL.md:9` | ~6 inline hardcoded pins | inlines replaced by citation in Phase 4 | change a pin in `runtime.md` → skills must not contradict it; `verify.sh` greps for stray inline pins |
+| 13 | `scripts/verify.sh` Luna-safety gate | `.github/workflows/verify.yml:18`; `scripts/verify.sh:50` | nothing (new guard) | n/a | insert `agent_type: prd_luna_implementer` into a SKILL.md → `verify.sh` must exit non-zero |
+| 14 | `.codex-plugin/plugin.json` + marketplace | `.codex-plugin/plugin.json:5` | the copy in `~/.claude/skills/prd-creator` and symlinks in `~/.codex/skills` | blocked until owner confirms Phase 6 swap | uninstall → `prd-creator` is no longer discoverable |
+| 15 | `skills/linchpin/SKILL.md` router | `skills/linchpin/SKILL.md:13`; `.codex-plugin/plugin.json:7` | nothing (new entry point) | n/a | invoke `$linchpin` → must dispatch per `intake.md`, not silently no-op |
+| 16 | `scripts/run-status.sh` (Phase 7) | `optional/unbuilt: no Phase 1-6 merge checkpoint in this run` | the goal judge reading a prose summary | n/a — optional phase not started | no goal-loop reference is emitted before an explicit checkpoint |
 
 ### Reachability
 
@@ -286,7 +282,8 @@ and makes branch delivery a redesign instead of a config value.
 1. User expresses intent → router reads `intake.md`, classifies, scores, preflights.
 2. Below floor → refuse and do the edit. Above → `prd-creator` writes 1..N conforming PRDs, **then stops and confirms**.
 3. On confirm: manager (Sol/medium) parses `Files (N)` lists, picks parallel or sequential per lane group, **announces any degrade**.
-4. Manager spawns `codex exec --model gpt-5.6-luna` workers — **never a native spawn**. One PRD is a swarm of one.
+4. Manager launches workers with the Worker invocation shape in
+   `references/runtime.md` — **never a native spawn**. One PRD is a swarm of one.
 5. Reviewer (Sol/medium, read-only) checks each lane against the PRD's own negative controls, observed red.
 6. Result observable in: `DELIVERED(<mode>)` lanes in the run ledger.
 
@@ -302,10 +299,10 @@ and makes branch delivery a redesign instead of a config value.
 *Every later phase edits `skills/**/SKILL.md`. Those paths do not exist yet.*
 
 **Files (4):**
-- `.gitignore` — NEW
-- `skills/prd-creator/SKILL.md` — IMPORT (copy of `~/.claude/skills/prd-creator/SKILL.md`, 26048 B)
-- `skills/prd-executor/SKILL.md` — IMPORT (copy of `~/.claude/skills/prd-executor/SKILL.md`, 8198 B) — imported to be harvested and deleted in Phase 2
-- `skills/prd-swarm-coordinator/SKILL.md` — IMPORT (copy of `~/.hermes/skills/autonomous-ai-agents/prd-swarm-coordinator/SKILL.md`)
+- `.gitignore` — NEW: repository ignore rules
+- `skills/prd-creator/SKILL.md` — NEW: verbatim source copy from `~/.claude/skills/prd-creator/SKILL.md` (26048 B)
+- `skills/prd-executor/SKILL.md` — NEW: verbatim source copy from `~/.claude/skills/prd-executor/SKILL.md` (8198 B), retained for harvesting before Phase 2 removal
+- `skills/prd-swarm-coordinator/SKILL.md` — NEW: verbatim source copy from `~/.hermes/skills/autonomous-ai-agents/prd-swarm-coordinator/SKILL.md`
 
 **Implementation:**
 - [ ] `git init`; first commit is the three imports **verbatim, unmodified**, so every later diff is reviewable against the real starting point
@@ -353,8 +350,8 @@ and makes branch delivery a redesign instead of a config value.
 | Test | Assertion | Negative control (observe red) |
 |---|---|---|
 | `tests/contract-conformance.sh` | a fixture PRD with the marker parses; every ledger row yields caller + control | strip the marker → must be flagged non-conforming, not silently accepted |
-| `tests/brief-contains-ledger.sh` | generated worker brief contains every ledger row | delete a row from the fixture → brief generation must fail, not emit a short brief |
-| `tests/files-list-parseable.sh` | each phase's `Files (N)` list parses to a path list | malform one list → must **fail**, never fall through to "disjoint" |
+| `tests/brief-contains-ledger.sh` | default and resolved-metadata briefs contain the ledger, runtime metadata, and every verbatim contract block | delete a row from the fixture → brief check must fail, not emit a short brief |
+| `tests/files-list-parseable.sh` | each phase's `Files (N)` list parses to a path list using only `NEW`/`EDIT`/`DELETE` | malform one list or use the retired fourth file kind → must **fail**, never fall through to "disjoint" |
 
 **Revert check:** delete `references/prd-contract.md` → `verify.sh` fails on the dangling reference and the conformance test errors.
 
@@ -370,7 +367,7 @@ and makes branch delivery a redesign instead of a config value.
 - `references/intake.md` — NEW: intent routing, complexity floor, capability preflight, `.linchpin.toml` schema + defaults, confirmation points, execution-mode selection
 - `skills/prd-swarm-coordinator/SKILL.md` — EDIT: absorbs the single-PRD path; cites `intake.md`; adds mode selection + sequential fallback; legacy-normalize fallback **deleted**
 - `skills/prd-creator/SKILL.md` — EDIT: gains **upgrade mode**; gains the hard stop before execution
-- `skills/prd-executor/SKILL.md` — **DELETE** (merged into the coordinator)
+- `skills/prd-executor/SKILL.md` — DELETE: merged into the coordinator
 
 **The intent routing table (goes in `intake.md`, keyed on intent, not repo state):**
 
@@ -407,11 +404,11 @@ who says *"fix the typo in phase 2"* must not get a swarm.
 
 | Test | Assertion | Negative control (observe red) |
 |---|---|---|
-| `tests/single-is-swarm-of-one.sh` | a 1-PRD run emits the same brief format, gates, and ledger row shape as one lane of a 3-PRD run | add an `if single` shortcut → the diff between the two must be non-empty and the test must fail |
+| `tests/single-is-swarm-of-one.sh` | a single lane and two many-lane briefs have the same resolved metadata shape, verbatim blocks, and gate check | add an `if single` shortcut or omit any block → the parity and observed-red checks must fail |
 | `tests/mode-selection.sh` | disjoint file sets → parallel; intersecting → those lanes sequential; mixed batch → per-group | make all lists disjoint → all-parallel; make all intersect → all-sequential |
 | `tests/worktree-fallback.sh` | with `git worktree add` stubbed to fail, all lanes still complete **sequentially** and an announcement is emitted | suppress the announcement → must fail; abort instead of degrading → must fail |
 | `tests/intent-routing.sh` | each routing-table row dispatches correctly | put 3 PRDs on disk and send "write a PRD for X" → must still route to `prd-creator`, proving intent beats state |
-| `tests/config-optional.sh` | a run with **no** `.linchpin.toml` completes on defaults; a score-2 request is refused | make the file required → must fail |
+| `tests/config-optional.sh` | a run with **no** `.linchpin.toml` completes on defaults; raised and lowered floors enforce the built-in floor; five lanes with `max_lanes = 2` report two active and three queued | make the file required, only print the values, or ignore the concurrency bound → must fail |
 
 **Revert check:** delete `references/intake.md` → the router has no dispatch rule, both skills have dangling citations, and `verify.sh` fails.
 
@@ -440,8 +437,8 @@ who says *"fix the typo in phase 2"* must not get a swarm.
 
 | Test | Assertion | Negative control (observe red) |
 |---|---|---|
-| `tests/gate-evidence.sh` | lane acceptance rejects a report whose gates have no observed-red line | all-green-never-red report → rejected; report with red evidence → accepted |
-| `tests/no-model-escalation.sh` | no SKILL.md contains a repair path that changes model tier | add `--model gpt-5.6-terra` to a repair snippet → must fail |
+| `tests/gate-evidence.sh` | lane acceptance requires a one-to-one gate-id match, each exact documented command, observed-red evidence, and a non-zero exit | all-green, wrong-id, duplicate/extra-id, wrong-command, and zero-exit reports → rejected |
+| `tests/no-model-escalation.sh` | no SKILL.md contains a repair path that changes model tier | add a forbidden third-tier model to a repair snippet → must fail |
 | `tests/gates-mode-invariant.sh` | the same lane in sequential mode faces the same gates as in parallel | weaken a gate under sequential → must fail |
 
 **Revert check:** remove the inherited-gates paragraph → `gate-evidence.sh` accepts an all-green report, which is the failure this phase exists to prevent.
@@ -462,16 +459,19 @@ who says *"fix the typo in phase 2"* must not get a swarm.
 **`references/runtime.md` must state, as a hard rule:**
 
 > Luna runs **only** as a `codex exec` subprocess. It must never be spawned as a
-> native subagent (`agent_type:` / `fork_turns:`), because `gpt-5.6-luna` reports
-> `multi_agent_version: "v1"` and the native spawn tool speaks v2. Sol is v2-capable
-> but is still invoked via `codex exec --sandbox read-only` so the reviewer role is
-> **enforced** rather than requested.
+> native subagent (`agent_type:` / `fork_turns:`), because the worker role reports
+> `multi_agent_version: "v1"` and the native spawn tool speaks v2. The reviewer
+> role is still invoked via `codex exec --sandbox read-only` so read-only behavior
+> is **enforced** rather than requested.
 
 **Implementation:**
-- [ ] Move the role table from §2 into `runtime.md` — manager `gpt-5.6-sol`/medium, worker `gpt-5.6-luna`/max, reviewer `gpt-5.6-sol`/medium read-only. Skills cite it
+- [ ] Move the role table from §2 into `runtime.md` — manager, worker, and
+  reviewer values live there; skills cite it
 - [ ] `verify.sh` gate A: fail if any `skills/**/*.md` mentions `agent_type` or `fork_turns` near a Luna reference
 - [ ] `verify.sh` gate B: fail if a model slug is hardcoded in a SKILL.md outside a fenced example that cites `runtime.md`
-- [ ] `verify.sh` gate C: preflight helper — read `$CODEX_HOME/models_cache.json`, assert `gpt-5.6-luna` exists and the lane mechanism is `exec`; fail loudly, never fall back
+- [ ] `verify.sh` gate C: preflight helper — read `$CODEX_HOME/models_cache.json`,
+  assert the runtime worker role exists with its required capability, and fail
+  loudly without fallback
 - [ ] `verify.sh` gate D: fail on any dangling `references/*.md` citation
 - [ ] `verify.sh` gate E: fail on any surviving reference to `prd-executor` or a Claude-native `Task` spawn
 - [ ] Record `codex exec resume <session-id>` as the sanctioned continuation mechanism, so "resume the thread" has one unambiguous meaning
@@ -487,7 +487,7 @@ who says *"fix the typo in phase 2"* must not get a swarm.
 | Test | Assertion | Negative control (observe red) |
 |---|---|---|
 | `tests/luna-never-native.sh` | `verify.sh` exits 0 on the clean tree | insert `agent_type: prd_luna_implementer` → **must exit non-zero**; this is the gate that would have caught sol-advisor's bug |
-| `tests/no-stray-pins.sh` | no hardcoded slug outside `runtime.md` | add `--model gpt-5.6-luna` to a skill body → must fail |
+| `tests/no-stray-pins.sh` | no hardcoded slug outside `runtime.md` | add the runtime worker model string to a skill body → must fail |
 | `tests/preflight-model.sh` | preflight passes against real `models_cache.json` | point it at a fixture cache with Luna absent → must fail, not fall back |
 | `tests/no-task-delegation.sh` | no skill references `prd-executor` or Claude-native `Task` spawning | re-add a `Task` spawn line → must fail |
 
@@ -639,22 +639,47 @@ happens at intake, once the lane count is known, and only on request.
 
 ---
 
-## 5. Checkpoint protocol
+## Negative Controls
 
-Automated checkpoint after every phase — spawn `prd-work-reviewer` with the standard
-integration audit. Phases 2, 4, 6, and 7 additionally require a **manual** checkpoint:
-Phase 2 because it deletes a skill and defines every degrade path the user will meet,
-Phase 4 because the Luna gate is the project's core guarantee, Phase 6 because it
-deletes files outside the repo, Phase 7 because a goal loop spends money
-autonomously.
+Every row uses this evidence format: `command: <exact command>; result: RED observed: <intentional mutation>; exit: <non-zero>`. A green-only result is `UNVERIFIED`, never evidence. Test scripts may wrap the failing mutation and print `OBSERVED-RED ...`; record both the wrapper command and the inner non-zero result. Phase 7 controls are optional/unbuilt until Phase 7 is explicitly started.
+
+| Gate | Negative control | Expected red | Exact command/result |
+|---|---|---|---|
+| Phase 0 — `tests/import-fidelity.sh` | Change one byte in an imported `SKILL.md` | Byte comparison fails | `command: sh tests/import-fidelity.sh`; result: RED observed: altered source comparison; exit: 1 |
+| Phase 1 — `tests/contract-conformance.sh` | Strip the `prd_contract: v1` marker | Parser exits non-zero | `command: sh tests/contract-conformance.sh`; result: RED observed: removed contract marker; exit: 1 |
+| Phase 1 — `tests/brief-contains-ledger.sh` | Delete one ledger row from the worker brief | Brief check exits non-zero | `command: sh tests/brief-contains-ledger.sh`; result: RED observed: omitted ledger row; exit: 1 |
+| Phase 1 — `tests/files-list-parseable.sh` | Malform one `Files (N)` count | File-list parser exits non-zero | `command: sh tests/files-list-parseable.sh`; result: RED observed: malformed file count; exit: 1 |
+| Phase 2 — `tests/single-is-swarm-of-one.sh` | Add an `if single` shortcut that omits a ledger row | Brief comparison fails | `command: sh tests/single-is-swarm-of-one.sh`; result: RED observed: single-lane brief mismatch; exit: 1 |
+| Phase 2 — `tests/mode-selection.sh` | Make the file sets falsely disjoint or falsely intersecting | Mode selection disagrees with the file graph | `command: sh tests/mode-selection.sh`; result: RED observed: forced parallel collision; exit: 1 |
+| Phase 2 — `tests/worktree-fallback.sh` | Suppress the fallback announcement or abort instead of degrading | Required sequential fallback is rejected | `command: sh tests/worktree-fallback.sh`; result: RED observed: fallback announcement or forced failure missing; exit: 1 |
+| Phase 2 — `tests/intent-routing.sh` | Put three PRDs on disk, then send `write a PRD for X` | State-based swarm routing exits non-zero | `command: sh tests/intent-routing.sh`; result: RED observed: intent route drift; exit: 1 |
+| Phase 2 — `tests/config-optional.sh` | Make `.linchpin.toml` required | Zero-config run exits non-zero | `command: sh tests/config-optional.sh`; result: RED observed: config defaults or enforcement missing; exit: 1 |
+| Phase 3 — `tests/gate-evidence.sh` | Submit an all-green report with no observed-red line | Gate acceptance exits non-zero | `command: sh tests/gate-evidence.sh`; result: RED observed: all-green gate report; exit: 1 |
+| Phase 3 — `tests/no-model-escalation.sh` | Add a forbidden third-tier model to a repair path | Verifier exits non-zero | `command: sh tests/no-model-escalation.sh`; result: RED observed: repair path changes model tier; exit: 1 |
+| Phase 3 — `tests/gates-mode-invariant.sh` | Weaken a gate only for sequential mode | Both mode reports are rejected | `command: sh tests/gates-mode-invariant.sh`; result: RED observed: weakened sequential gate set; exit: 1 |
+| Phase 4 — `tests/luna-never-native.sh` | Insert a native-spawn marker into a skill | Verifier exits non-zero with file and line | `command: sh tests/luna-never-native.sh`; result: RED observed: native Luna reference; exit: 1 |
+| Phase 4 — `tests/no-stray-pins.sh` | Add the runtime worker model to a skill body | Verifier exits non-zero | `command: sh tests/no-stray-pins.sh`; result: RED observed: model string copied into a skill body; exit: 1 |
+| Phase 4 — `tests/preflight-model.sh` | Point preflight at a cache without the worker | Preflight exits non-zero without fallback | `command: sh tests/preflight-model.sh`; result: RED observed: worker capability missing; exit: 1 |
+| Phase 4 — `tests/no-task-delegation.sh` | Re-add a Claude-native delegation reference | Verifier exits non-zero | `command: sh tests/no-task-delegation.sh`; result: RED observed: native delegation reference; exit: 1 |
+| Phase 5 — `tests/manifest-valid.sh` | Break JSON or add an invented manifest key | Manifest check exits non-zero | `command: sh tests/manifest-valid.sh`; result: RED observed: manifest schema drift; exit: 1 |
+| Phase 5 — `tests/skills-discoverable.sh` | Uninstall the plugin | Skills disappear from discovery | `command: owner-approved plugin uninstall and fresh discovery`; result: RED observed: skills unresolved after uninstall; exit: 1 |
+| Phase 5 — `tests/router-matches-intake.sh` | Add a route to `intake.md` without a router branch | Parity comparison exits non-zero | `command: sh tests/router-matches-intake.sh`; result: RED observed: intake-only route; exit: 1 |
+| Phase 5 — `tests/router-not-a-gate.sh` | Delete the router and invoke the two real skills directly | Direct invocation exits non-zero only if router gating exists | `command: sh tests/router-not-a-gate.sh`; result: RED observed: direct skill gated by router; exit: 1 |
+| Phase 6 — `tests/no-duplicate-skills.sh` | Restore one incumbent copy | Duplicate detector exits non-zero | `command: sh tests/no-duplicate-skills.sh`; result: RED observed: incumbent duplicate; exit: 1 |
+| Phase 6 — `tests/post-swap-invoke.sh` | Use the manual revert check: uninstall the plugin, then invoke each skill | Invocation becomes unresolved/non-zero | `command: owner-approved uninstall and fresh-session skill invocations`; result: RED observed: unresolved skill invocation; exit: 1 |
+| Phase 7 — `tests/run-status-exit.sh` | Flip one fixture lane to `PARTIAL` | Status command exits non-zero | `command: sh tests/run-status-exit.sh`; result: RED observed: PARTIAL lane; exit: 1 |
+| Phase 7 — `tests/goal-judges-stdout.sh` | Remove the `never judge a summary` clause | Goal contract check exits non-zero | `command: sh tests/goal-judges-stdout.sh`; result: RED observed: summary judging clause removed; exit: 1 |
+| Phase 7 — `tests/goal-not-auto-armed.sh` | Add a `SessionStart` hook or unprompted goal arming | Auto-arm check exits non-zero | `command: sh tests/goal-not-auto-armed.sh`; result: RED observed: unprompted goal arming; exit: 1 |
 
 ---
 
-## 6. Acceptance criteria
+## Acceptance Criteria
 
 Swarm-scoped — the goal:
 
-- [ ] One or many PRDs execute through **one** path: manager `gpt-5.6-sol`/medium, workers `gpt-5.6-luna`/max via `codex exec`, reviewer Sol/medium read-only
+- [ ] One or many PRDs execute through **one** path: manager, worker, and
+  reviewer values resolve from `references/runtime.md`; workers use `codex exec`
+  and reviewers use the read-only shape
 - [ ] A single-PRD run produces the same brief format, gates, review, and ledger row shape as one lane of an N-PRD run — there is no `if single` branch
 - [ ] Lanes with disjoint file sets run in parallel worktrees; lanes whose `Files (N)` lists intersect run **sequentially**, never concurrently
 - [ ] With `git worktree` unavailable, **every lane still completes sequentially** and the degrade is announced — the run is never refused
@@ -676,12 +701,34 @@ Intake-scoped:
 
 **Integration gates:**
 
-- [ ] Integration Ledger has zero `TBD` cells; every live caller is a real non-test `file:line`
+- [ ] Integration Ledger has zero placeholder cells; every live caller is a real non-test `file:line`
 - [ ] Caller census pasted for `prd-contract.md`, `intake.md`, `runtime.md`, and `verify.sh`
 - [ ] Revert check passed for every phase
 - [ ] Every `Replaces` row's old path deleted or delegating — Phase 6 closes this
 - [ ] Every gate has a negative control observed failing
 - [ ] Proved on the real subject: the first swarm run uses a **real multi-PRD batch in a real repo**, not a toy fixture, and at least one run exercises the sequential fallback
+
+---
+
+## Checkpoint Protocol
+
+Automated checkpoint after every phase: the manager launches exactly one fresh
+Sol/medium reviewer per lane with the runtime-resolved read-only shape:
+
+```text
+codex exec --model <Reviewer.Model> -c 'model_reasoning_effort="<Reviewer.Effort>"' --sandbox read-only -C <lane> <review>
+```
+
+Record `review_used: true` before launch. The reviewer is read-only; Luna uses
+the worker `codex exec` shape for repairs, and the manager closes findings. No
+second review starts after repair. Phases 2, 4, 6, and 7 additionally require a
+**manual** checkpoint: Phase 2 because it deletes a skill and defines every
+degrade path the user will meet, Phase 4 because the Luna gate is the project's
+core guarantee, Phase 6 because it deletes files outside the repo, and Phase 7
+because a goal loop spends money autonomously. Phase 7 remains optional until
+the owner confirms the Phase 1–6 boundary.
+
+---
 
 ## Out of scope (follow-up PRD)
 

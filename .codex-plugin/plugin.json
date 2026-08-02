@@ -1,0 +1,9 @@
+{
+  "name": "linchpin",
+  "version": "0.1.0",
+  "description": "Codex-only PRD swarm orchestration with contract-preserving intake.",
+  "skills": "./skills/",
+  "interface": {
+    "defaultPrompt": "Orchestrate a Sol/Luna swarm over one or many conforming PRDs."
+  }
+}

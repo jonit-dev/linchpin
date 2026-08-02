@@ -1,0 +1,22 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  repository-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify plugin contract and runtime safety
+        env:
+          LINCHPIN_MODELS_CACHE: ${{ github.workspace }}/tests/fixtures/models-cache-with-luna.json
+        run: sh scripts/verify.sh
+      - name: Run positive and observed-red tests
+        env:
+          LINCHPIN_MODELS_CACHE: ${{ github.workspace }}/tests/fixtures/models-cache-with-luna.json
+        run: sh tests/run-all.sh
