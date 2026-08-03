@@ -4,6 +4,7 @@ set -eu
 test_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 tests='import-fidelity.sh
 contract-conformance.sh
+legacy-migration.sh
 brief-contains-ledger.sh
 files-list-parseable.sh
 single-is-swarm-of-one.sh

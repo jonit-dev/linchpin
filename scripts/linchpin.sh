@@ -55,15 +55,37 @@ runtime_metadata() {
 }
 
 marker_is_valid() {
+  # The marker lives in the opening front-matter block. Other front-matter keys
+  # are allowed; the exact `prd_contract: v1` line is not optional.
   awk 'NR == 1 && $0 != "---" { exit 1 }
-       NR == 2 && $0 != "prd_contract: v1" { exit 1 }
-       NR == 3 { if ($0 != "---") exit 1; found = 1; exit }
-       END { if (!found) exit 1 }' "$1"
+       NR > 1 && $0 == "---" { if (found) ok = 1; exit }
+       NR > 1 && $0 == "prd_contract: v1" { found = 1 }
+       NR > 50 { exit }
+       END { if (!ok) exit 1 }' "$1"
+}
+
+section_pattern() {
+  # A required heading may carry a leading number and trailing context, but the
+  # named section itself is never renamed. `references/prd-contract.md` owns this
+  # rule; every reader below builds its regex here so they cannot drift.
+  printf '^## ([0-9]+[.] )?%s([[:space:]].*)?$\n' "$1"
 }
 
 section_line() {
-  # The first argument is a basic extended regular expression.
-  grep -En "$1" "$2" | sed -n '1s/:.*//p'
+  # The first argument is a section name, not a regular expression.
+  grep -En "$(section_pattern "$1")" "$2" | sed -n '1s/:.*//p'
+}
+
+section_block() {
+  awk -v name="$2" '
+    BEGIN {
+      start = "^## ([0-9]+[.] )?" name "([[:space:]].*)?$"
+      prefix = "^## ([0-9]+[.] )?" name
+    }
+    $0 ~ start { active = 1 }
+    active && /^## / && $0 !~ prefix { exit }
+    active { print }
+  ' "$1"
 }
 
 files_list() {
@@ -116,19 +138,19 @@ files_list() {
 }
 
 ledger_block() {
-  awk '
-    /^## ([0-9]+[.] )?Integration Ledger[[:space:]]*$/ { active = 1 }
-    active && /^## / && $0 !~ /^## ([0-9]+[.] )?Integration Ledger/ { exit }
-    active { print }
-  ' "$1"
+  section_block "$1" 'Integration Ledger'
 }
 
 negative_block() {
-  awk '
-    /^## ([0-9]+[.] )?Negative Controls[[:space:]]*$/ { active = 1 }
-    active && /^## / && $0 !~ /^## ([0-9]+[.] )?Negative Controls/ { exit }
-    active { print }
-  ' "$1"
+  section_block "$1" 'Negative Controls'
+}
+
+acceptance_block() {
+  section_block "$1" 'Acceptance Criteria'
+}
+
+checkpoint_block() {
+  section_block "$1" 'Checkpoint [Pp]rotocol'
 }
 
 negative_data() {
@@ -240,33 +262,247 @@ validate_ledger() {
   ' || die "ledger row lacks a real caller or negative control: $prd"
 }
 
+problem() {
+  printf '%s\n' "$*" >> "$problem_file"
+}
+
+collect_problem() {
+  # Run a validator that dies on failure and record its message instead of
+  # exiting, so one contract run names every gap the author still has to close.
+  if ! validator_message=$("$@" 2>&1 >/dev/null); then
+    problem "$(printf '%s\n' "$validator_message" | sed 's/^ERROR: //' | sed -n '1p')"
+  fi
+}
+
+contract_problems() {
+  # Callers rely on this reporting every gap at once; it never exits early and
+  # never reuses the shared `prd` variable its callers still need.
+  contract_prd="$1"
+  problem_file=$(mktemp "${TMPDIR:-/tmp}/linchpin-contract.XXXXXX")
+  marker_is_valid "$contract_prd" || problem "missing or invalid prd_contract: v1 marker: $contract_prd"
+
+  integration_line=$(section_line 'Integration Ledger' "$contract_prd" || true)
+  phases_line=$(section_line 'Execution Phases' "$contract_prd" || true)
+  negative_line=$(section_line 'Negative Controls' "$contract_prd" || true)
+  acceptance_line=$(section_line 'Acceptance Criteria' "$contract_prd" || true)
+  checkpoint_line=$(section_line 'Checkpoint [Pp]rotocol' "$contract_prd" || true)
+  [ -n "$integration_line" ] || problem "missing Integration Ledger: $contract_prd"
+  [ -n "$phases_line" ] || problem "missing Execution Phases: $contract_prd"
+  [ -n "$negative_line" ] || problem "missing Negative Controls: $contract_prd"
+  [ -n "$acceptance_line" ] || problem "missing Acceptance Criteria: $contract_prd"
+  [ -n "$checkpoint_line" ] || problem "missing Checkpoint Protocol: $contract_prd"
+
+  if [ -n "$integration_line" ] && [ -n "$phases_line" ] && [ -n "$negative_line" ] &&
+     [ -n "$acceptance_line" ] && [ -n "$checkpoint_line" ]; then
+    if [ "$integration_line" -ge "$phases_line" ] ||
+       [ "$phases_line" -ge "$negative_line" ] ||
+       [ "$negative_line" -ge "$acceptance_line" ] ||
+       [ "$acceptance_line" -ge "$checkpoint_line" ]; then
+      problem "required sections are out of order: $contract_prd"
+    fi
+  fi
+
+  ( files_list "$contract_prd" ) >/dev/null 2>&1 ||
+    problem "one or more Files (N) lists are malformed: $contract_prd"
+  collect_problem validate_ledger "$contract_prd"
+  collect_problem validate_negative_controls "$contract_prd"
+
+  cat "$problem_file"
+  problem_count=$(awk 'END { print NR + 0 }' "$problem_file")
+  rm -f -- "$problem_file"
+  [ "$problem_count" -eq 0 ]
+}
+
 contract_check() {
   prd="$1"
   require_file "$prd"
-  marker_is_valid "$prd" || die "missing or invalid prd_contract: v1 marker: $prd"
+  if ! reported=$(contract_problems "$prd"); then
+    printf '%s\n' "$reported" | sed 's/^/ERROR: /' >&2
+    exit 1
+  fi
+  printf 'CONFORMING %s\n' "$prd"
+}
 
-  integration_line=$(section_line '^([#][#]) ([0-9]+[.] )?Integration Ledger[[:space:]]*$' "$prd" || true)
-  phases_line=$(section_line '^([#][#]) ([0-9]+[.] )?Execution Phases[[:space:]]*$' "$prd" || true)
-  negative_line=$(section_line '^([#][#]) ([0-9]+[.] )?Negative Controls[[:space:]]*$' "$prd" || true)
-  acceptance_line=$(section_line '^([#][#]) ([0-9]+[.] )?Acceptance Criteria[[:space:]]*$' "$prd" || true)
-  checkpoint_line=$(section_line '^([#][#]) ([0-9]+[.] )?Checkpoint [Pp]rotocol[[:space:]]*$' "$prd" || true)
-  [ -n "$integration_line" ] || die "missing Integration Ledger: $prd"
-  [ -n "$phases_line" ] || die "missing Execution Phases: $prd"
-  [ -n "$negative_line" ] || die "missing Negative Controls: $prd"
-  [ -n "$acceptance_line" ] || die "missing Acceptance Criteria: $prd"
-  [ -n "$checkpoint_line" ] || die "missing Checkpoint Protocol: $prd"
+migrate_body() {
+  # Mechanical legacy -> v1 normalization. It renames the required headings,
+  # rewrites prose `**Files:**` paragraphs into parseable `Files (N)` lists, and
+  # scaffolds the sections a legacy artifact never had. Anything it cannot
+  # convert without inventing content is emitted as a MIGRATION-TODO line so the
+  # contract stays red until an author fills it in.
+  awk -v has_phases="$1" -v has_acceptance="$2" -v has_negative="$3" -v has_checkpoint="$4" '
+    function trim(value) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      return value
+    }
+    function emit_negative_controls() {
+      print "## Negative Controls"
+      print ""
+      print "<!-- MIGRATION-TODO: one row per gate named in the phases above."
+      print "     The fourth column is machine-checked and must read exactly:"
+      print "     `command: <cmd>`; result: RED observed: <what broke>; exit: <non-zero> -->"
+      print ""
+      print "| Gate | Negative control | Expected red | Exact command/result |"
+      print "|---|---|---|---|"
+      print "| MIGRATION-TODO | MIGRATION-TODO | MIGRATION-TODO | MIGRATION-TODO |"
+      print ""
+    }
+    function emit_checkpoint() {
+      print "## Checkpoint Protocol"
+      print ""
+      print "MIGRATION-TODO: name the automated and manual checks, the evidence"
+      print "format, and the condition that blocks delivery. A gate may not be"
+      print "declared passed from a green-only run."
+      print ""
+    }
+    function flush_files(   parts, count, i, entry, path, kind, description, lines, total) {
+      if (files_buffer == "") return
+      total = split(files_buffer, parts, "·")
+      count = 0
+      lines = ""
+      for (i = 1; i <= total; i++) {
+        entry = trim(parts[i])
+        sub(/[.]$/, "", entry)
+        entry = trim(entry)
+        if (entry == "") continue
+        count++
+        path = ""
+        if (match(entry, /`[^`]+`/)) {
+          path = substr(entry, RSTART + 1, RLENGTH - 2)
+        }
+        kind = ""
+        if (entry ~ /(^|[^A-Za-z])DELETE([^A-Za-z]|$)/) kind = "DELETE"
+        else if (entry ~ /(^|[^A-Za-z])NEW([^A-Za-z]|$)/) kind = "NEW"
+        else if (entry ~ /(^|[^A-Za-z])EDIT([^A-Za-z]|$)/) kind = "EDIT"
+        if (path == "" || kind == "" || path ~ /[[:space:]]/) {
+          lines = lines "- MIGRATION-TODO: legacy file entry needs one backtick path and one NEW/EDIT/DELETE kind: " entry "\n"
+          continue
+        }
+        description = entry
+        sub(/`[^`]+`/, "", description)
+        gsub(/\*\*/, "", description)
+        sub(/(^|[^A-Za-z])(NEW|EDIT|DELETE)([^A-Za-z]|$)/, " ", description)
+        description = trim(description)
+        gsub(/^[(]|[)]$/, "", description)
+        description = trim(description)
+        if (description == "") description = "migrated from the legacy file list"
+        lines = lines "- `" path "` - " kind ": " description "\n"
+      }
+      if (count > 0) {
+        print "**Files (" count "):**"
+        print ""
+        printf "%s", lines
+      }
+      files_buffer = ""
+      in_files = 0
+    }
+    in_files {
+      if (trim($0) == "") { flush_files(); print ""; next }
+      files_buffer = files_buffer " " $0
+      next
+    }
+    /^\*\*Files:\*\*/ {
+      files_buffer = $0
+      sub(/^\*\*Files:\*\*/, "", files_buffer)
+      in_files = 1
+      next
+    }
+    /^## / {
+      heading = $0
+      body = heading
+      sub(/^##[[:space:]]+/, "", body)
+      number = ""
+      if (match(body, /^[0-9]+[.][[:space:]]+/)) {
+        number = substr(body, RSTART, RLENGTH)
+        body = substr(body, RSTART + RLENGTH)
+      }
+      if (!has_phases && body ~ /^Phases([[:space:]]|$)/) {
+        print "## " number "Execution Phases"
+        next
+      }
+      if (body ~ /^Acceptance([[:space:]]|$)/ || body ~ /^Acceptance Criteria([[:space:]]|$)/) {
+        if (!has_negative && !negative_done) { emit_negative_controls(); negative_done = 1 }
+        if (!has_acceptance) { print "## " number "Acceptance Criteria"; next }
+      }
+      print
+      next
+    }
+    { print }
+    END {
+      flush_files()
+      if (!has_negative && !negative_done) { print ""; emit_negative_controls() }
+      if (!has_checkpoint) { print ""; emit_checkpoint() }
+    }
+  '
+}
 
-  if [ "$integration_line" -ge "$phases_line" ] ||
-     [ "$phases_line" -ge "$negative_line" ] ||
-     [ "$negative_line" -ge "$acceptance_line" ] ||
-     [ "$acceptance_line" -ge "$checkpoint_line" ]; then
-    die "required sections are out of order: $prd"
+migrate() {
+  [ "$#" -ge 1 ] || die 'usage: linchpin.sh migrate PRD [--out PATH] [--force]'
+  prd="$1"
+  shift
+  migrate_out=
+  migrate_force=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --out) [ "$#" -ge 2 ] || die '--out needs a path'; migrate_out="$2"; shift 2 ;;
+      --out=*) migrate_out=${1#*=}; shift ;;
+      --force) migrate_force=1; shift ;;
+      *) die "unknown migrate option: $1" ;;
+    esac
+  done
+  require_file "$prd"
+  if contract_problems "$prd" >/dev/null 2>&1; then
+    printf 'ALREADY-CONFORMING %s\n' "$prd"
+    return 0
+  fi
+  [ -n "$migrate_out" ] || migrate_out=$(printf '%s' "$prd" | sed 's/\.md$//').v1.md
+  [ "$migrate_out" != "$prd" ] || die 'migrate never writes over the original PRD'
+  if [ -e "$migrate_out" ] && [ "$migrate_force" -eq 0 ]; then
+    die "migration target already exists: $migrate_out (pass --force to replace it)"
   fi
 
-  files_list "$prd" >/dev/null || die "one or more Files (N) lists are malformed: $prd"
-  validate_ledger "$prd"
-  validate_negative_controls "$prd"
-  printf 'CONFORMING %s\n' "$prd"
+  migrate_dir=$(mktemp -d "${TMPDIR:-/tmp}/linchpin-migrate.XXXXXX")
+  has_phases=0
+  has_acceptance=0
+  has_negative=0
+  has_checkpoint=0
+  [ -z "$(section_line 'Execution Phases' "$prd" || true)" ] || has_phases=1
+  [ -z "$(section_line 'Acceptance Criteria' "$prd" || true)" ] || has_acceptance=1
+  [ -z "$(section_line 'Negative Controls' "$prd" || true)" ] || has_negative=1
+  [ -z "$(section_line 'Checkpoint [Pp]rotocol' "$prd" || true)" ] || has_checkpoint=1
+
+  migrate_body "$has_phases" "$has_acceptance" "$has_negative" "$has_checkpoint" \
+    < "$prd" > "$migrate_dir/body"
+  if [ "$(sed -n '1p' "$migrate_dir/body")" = '---' ]; then
+    # Keep an existing front-matter block and add the marker to it.
+    awk 'NR == 1 { print; print "prd_contract: v1"; next } { print }' \
+      "$migrate_dir/body" > "$migrate_dir/candidate"
+  else
+    { printf -- '---\nprd_contract: v1\n---\n\n'; cat "$migrate_dir/body"; } > "$migrate_dir/candidate"
+  fi
+
+  printf 'ORIGINAL-PRESERVED %s\n' "$prd"
+  cp "$migrate_dir/candidate" "$migrate_out"
+  if migrate_problems=$(contract_problems "$migrate_out"); then
+    rm -rf -- "$migrate_dir"
+    printf 'MIGRATED %s -> %s\n' "$prd" "$migrate_out"
+    printf '%s\n' 'REVIEW: every converted Files (N) entry is a mechanical rewrite of legacy prose; confirm the paths before scheduling lanes.'
+    printf 'NEXT: sh scripts/linchpin.sh route execute %s\n' "$migrate_out"
+    return 0
+  fi
+  # A candidate that still needs an author must not claim conformance.
+  cp "$migrate_dir/body" "$migrate_out"
+  rm -rf -- "$migrate_dir"
+  printf 'MIGRATION-INCOMPLETE %s -> %s\n' "$prd" "$migrate_out"
+  printf '%s\n' 'The marker was withheld. Remaining gaps need an author, not a parser:'
+  printf '%s\n' "$migrate_problems" | sed 's/^/- /'
+  todo_lines=$(grep -n 'MIGRATION-TODO' "$migrate_out" | sed -n '1,20p' || true)
+  if [ -n "$todo_lines" ]; then
+    printf '%s\n' 'MIGRATION-TODO markers to resolve:'
+    printf '%s\n' "$todo_lines" | sed 's/^/- /'
+  fi
+  printf 'NEXT: fill the gaps above in %s, then rerun: sh scripts/linchpin.sh contract %s\n' \
+    "$migrate_out" "$migrate_out"
+  return 1
 }
 
 require_exact_line() {
@@ -427,17 +663,9 @@ brief() {
   printf '%s\n' '' '## Negative Controls (verbatim)'
   negative_block "$prd"
   printf '%s\n' '' '## Acceptance Criteria (verbatim)'
-  awk '
-    /^## ([0-9]+[.] )?Acceptance Criteria[[:space:]]*$/ { active = 1 }
-    active && /^## / && $0 !~ /^## ([0-9]+[.] )?Acceptance Criteria/ { exit }
-    active { print }
-  ' "$prd"
+  acceptance_block "$prd"
   printf '%s\n' '' '## Checkpoint Protocol (verbatim)'
-  awk '
-    /^## ([0-9]+[.] )?Checkpoint [Pp]rotocol[[:space:]]*$/ { active = 1 }
-    active && /^## / && $0 !~ /^## ([0-9]+[.] )?Checkpoint [Pp]rotocol/ { exit }
-    active { print }
-  ' "$prd"
+  checkpoint_block "$prd"
   printf '%s\n' '' '## Resolved Lane Metadata'
   printf 'Worker runtime: %s\n' "$worker_runtime"
   printf 'Reviewer runtime: %s\n' "$reviewer_runtime"
@@ -479,16 +707,8 @@ brief_check() {
   trap 'rm -rf -- "$brief_temp_dir"' EXIT HUP INT TERM
   ledger_block "$prd" > "$brief_temp_dir/ledger"
   negative_block "$prd" > "$brief_temp_dir/negative"
-  awk '
-    /^## ([0-9]+[.] )?Acceptance Criteria[[:space:]]*$/ { active = 1 }
-    active && /^## / && $0 !~ /^## ([0-9]+[.] )?Acceptance Criteria/ { exit }
-    active { print }
-  ' "$prd" > "$brief_temp_dir/acceptance"
-  awk '
-    /^## ([0-9]+[.] )?Checkpoint [Pp]rotocol[[:space:]]*$/ { active = 1 }
-    active && /^## / && $0 !~ /^## ([0-9]+[.] )?Checkpoint [Pp]rotocol/ { exit }
-    active { print }
-  ' "$prd" > "$brief_temp_dir/checkpoint"
+  acceptance_block "$prd" > "$brief_temp_dir/acceptance"
+  checkpoint_block "$prd" > "$brief_temp_dir/checkpoint"
   for block_name in ledger negative acceptance checkpoint; do
     block_has_exact_sequence "$brief_temp_dir/$block_name" "$brief_file" || die "worker brief omitted or changed the verbatim $block_name block"
   done
@@ -536,6 +756,8 @@ config_values() {
     "$execution" "$delivery" "$base" "$review" "$max_lanes" "$prd_floor"
 }
 
+execute_intent='run|execute|start|begin|launch|resume|continue|kick off'
+
 route() {
   intent=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
   [ -n "$intent" ] || die 'route needs an intent'
@@ -544,7 +766,7 @@ route() {
   if printf '%s' "$intent" | grep -Eq 'build|implement'; then
     score="${1:-}"
     [ "$#" -gt 0 ] && shift
-  elif printf '%s' "$intent" | grep -Eq 'run|execute' &&
+  elif printf '%s' "$intent" | grep -Eq "$execute_intent" &&
        [ "$#" -gt 0 ] && printf '%s' "$1" | grep -Eq '^[0-9]+$'; then
     # Keep compatibility with the old helper shape while allowing the
     # documented execute form: route execute PRD [PRD ...].
@@ -572,7 +794,7 @@ route() {
     esac
   done
   load_config "$config_dir"
-  if printf '%s' "$intent" | grep -Eq 'write[[:space:]]+a[[:space:]]+prd'; then
+  if printf '%s' "$intent" | grep -Eq '(writ(e|ing)|draft(ing)?|author(ing)?|creat(e|ing))([[:space:]]+[a-z]+){0,3}[[:space:]]+prd'; then
     printf '%s\n' 'ROUTE-WRITE-PRD -> prd-creator'
     return
   fi
@@ -588,7 +810,7 @@ route() {
     fi
     return
   fi
-  if printf '%s' "$intent" | grep -Eq 'run|execute'; then
+  if printf '%s' "$intent" | grep -Eq "$execute_intent"; then
     count=$(wc -l < "$prd_list" | tr -d ' ')
     if [ "$count" -eq 0 ]; then
       printf '%s\n' 'ROUTE-EXECUTE-NONE -> ask-once'
@@ -869,6 +1091,7 @@ command_name="${1:-}"
 shift || true
 case "$command_name" in
   contract) [ "$#" -eq 1 ] || die 'usage: linchpin.sh contract PRD'; contract_check "$1" ;;
+  migrate) [ "$#" -ge 1 ] || die 'usage: linchpin.sh migrate PRD [--out PATH] [--force]'; migrate "$@" ;;
   brief) [ "$#" -ge 1 ] || die 'usage: linchpin.sh brief PRD [LANE_ID LANE_MODE DELIVERY_MODE] [--config-dir DIR]'; brief "$@" ;;
   brief-check) [ "$#" -eq 2 ] || die 'usage: linchpin.sh brief-check PRD BRIEF'; brief_check "$1" "$2" ;;
   files) [ "$#" -eq 1 ] || die 'usage: linchpin.sh files PRD'; files_list "$1" ;;
@@ -878,5 +1101,5 @@ case "$command_name" in
   schedule) [ "$#" -ge 3 ] || die 'usage: linchpin.sh schedule EXECUTION WORKTREE_STATUS LANE...'; schedule "$@" ;;
   gate) [ "$#" -eq 2 ] || die 'usage: linchpin.sh gate PRD REPORT'; gate_evidence "$1" "$2" ;;
   preflight) [ "$#" -le 1 ] || die 'usage: linchpin.sh preflight [models_cache.json]'; preflight_model "${1:-}" ;;
-  *) die 'commands: contract, brief, files, config, route, mode, schedule, gate, preflight' ;;
+  *) die 'commands: contract, migrate, brief, files, config, route, mode, schedule, gate, preflight' ;;
 esac

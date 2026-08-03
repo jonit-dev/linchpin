@@ -15,7 +15,7 @@ take a shortcut. The `references/` directory is at the plugin root, beside
 `references/intake.md` before intake, and read `references/runtime.md` before
 any preflight or delegation. The live contract consumer is
 `skills/prd-swarm-coordinator/SKILL.md:13`; the executable contract check is
-`scripts/linchpin.sh:130`.
+`scripts/linchpin.sh:313`.
 
 The manager is the current session's Sol/medium role. Workers, repair workers,
 integration workers, and conflict workers use the Luna/max role only through
@@ -37,8 +37,11 @@ helper source into context.
 1. Read the complete input artifact and validate `prd_contract: v1` with
    `scripts/linchpin.sh contract <prd>`. Do not summarize before validation.
 2. If the marker or any required structure is missing, return the artifact to
-   creator upgrade mode. Preserve the original, wait for the durable conforming
-   replacement, and then re-route. There is no in-flight legacy normalization.
+   the migration path in `references/intake.md`: `scripts/linchpin.sh migrate`
+   first, then creator upgrade mode for whatever gaps it reports. The original
+   file stays untouched, and an existing PRD is never replaced by a newly
+   drafted one. Wait for the durable conforming replacement, then re-route.
+   There is no in-flight legacy normalization.
 3. For a conforming artifact, preserve the Integration Ledger, Negative Controls,
    Acceptance Criteria, and Checkpoint Protocol verbatim. The coordinator does
    not re-derive a shorter checklist.

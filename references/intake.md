@@ -11,16 +11,24 @@ by the verification tests.
 
 | Route id | User intent | Precondition | Dispatch |
 |---|---|---|---|
-| `ROUTE-WRITE-PRD` | "write a PRD for X" | none | `prd-creator` |
+| `ROUTE-WRITE-PRD` | "write/draft/author a PRD for X" | none | `prd-creator` |
 | `ROUTE-BUILD-SMALL` | "build/implement X" | complexity score <= 2 | refuse pipeline; offer direct edit |
 | `ROUTE-BUILD-LARGE` | "build/implement X" | complexity score >= 3 | `prd-creator`, then stop for confirmation |
-| `ROUTE-EXECUTE-CONFORMING` | "run/execute" | one or more conforming PRDs | `prd-swarm-coordinator` |
-| `ROUTE-EXECUTE-UPGRADE` | any execute intent | at least one PRD is non-conforming | `prd-creator` upgrade mode, then re-route |
-| `ROUTE-EXECUTE-NONE` | "run/execute" | no PRD supplied or found | ask once for the PRD path |
+| `ROUTE-EXECUTE-CONFORMING` | "run/execute/start/begin/launch/resume" | one or more conforming PRDs | `prd-swarm-coordinator` |
+| `ROUTE-EXECUTE-UPGRADE` | any execute intent | at least one PRD is non-conforming | migrate, then `prd-creator` upgrade mode, then re-route |
+| `ROUTE-EXECUTE-NONE` | "run/execute/start" | no PRD supplied or found | ask once for the PRD path |
 | `ROUTE-AMBIGUOUS` | intent cannot be classified | any | ask one short question; never guess |
 
 Intent wins over repository state: three conforming files on disk do not change
 `ROUTE-WRITE-PRD` into an execution route.
+
+`start`, `begin`, `launch`, and `resume` are execution verbs, not authoring
+verbs. "start PRD 007 to 010" names artifacts the user already wrote, so it takes
+an execution route. An authoring route requires an explicit authoring verb for a
+PRD that does not exist yet. When an execute intent names PRD paths, never draft
+a replacement, a companion, or a "corrected" version of them — the user's file is
+the input, not a first draft. Confirm the classification with
+`scripts/linchpin.sh route "<intent>" <prd-path>...` rather than inferring it.
 
 ## Complexity floor
 
@@ -32,11 +40,29 @@ may raise the floor, but it may not lower the built-in refusal for scores <= 2.
 
 ## Non-conforming PRDs and confirmation
 
-An execute request with a missing or invalid `prd_contract: v1` marker enters
-creator upgrade mode. Upgrade mode writes a durable conforming artifact, keeps
-the original available for audit, and returns to intake. It never normalizes a
-legacy PRD inside the coordinator. After creator output, execution stops at an
-explicit confirmation point. Creator output never auto-starts workers.
+An execute request with a missing or invalid `prd_contract: v1` marker enters the
+legacy migration path, in this order:
+
+1. Run `scripts/linchpin.sh migrate <prd>` on every non-conforming path. It
+   copies nothing over the original, writes `<prd>.v1.md` beside it, renames the
+   required headings, rewrites prose `**Files:**` paragraphs into parseable
+   `Files (N)` lists, and scaffolds any missing section.
+2. On `MIGRATED`, re-route the new `.v1.md` path. Nothing else is required.
+3. On `MIGRATION-INCOMPLETE`, the marker was deliberately withheld. Creator
+   upgrade mode fills only the reported gaps and the `MIGRATION-TODO` markers in
+   the generated artifact.
+
+**The original file is never edited, moved, or rewritten.** Git history is not a
+substitute for a preserved file; upgrade mode works on the generated `.v1.md`
+copy. Upgrade mode is a gap-filling pass, not a rewrite: it does not restate the
+author's context, phases, or acceptance wording in its own words, and it never
+replaces a legacy PRD with a freshly drafted one. If a gap needs information the
+artifact does not contain — a gate command, a caller `file:line` — ask once
+instead of inventing it.
+
+Legacy PRDs are never normalized inside the coordinator. After creator output,
+execution stops at an explicit confirmation point. Creator output never
+auto-starts workers.
 
 Every execution-mode or delivery degradation is announced before it takes
 effect. The user can confirm the announced fallback; the manager records the

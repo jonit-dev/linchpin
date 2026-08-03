@@ -47,12 +47,25 @@ a PRD, but creator output always stops at an explicit confirmation point. Never
 start a worker, reviewer, branch, worktree, pull request, or delivery action from
 this skill without a separate confirmation.
 
-If intake sends a non-conforming existing PRD here, use **upgrade mode**: retain
-the original artifact for audit, repair it into a new durable artifact with the
-contract marker, parseable `Files (N)` lists, complete ledger, negative controls,
-acceptance criteria, and checkpoint protocol, then return to intake. Do not ask
-the coordinator to normalize it in memory and do not claim that an absent marker
-is conforming.
+If intake sends a non-conforming existing PRD here, use **upgrade mode**. It is a
+gap-filling pass over a machine-generated copy, never a rewrite:
+
+1. Run `scripts/linchpin.sh migrate <prd>` first. It preserves the original
+   untouched and writes `<prd>.v1.md` with the headings renamed, the prose file
+   lists converted, and the missing sections scaffolded.
+2. If it reports `MIGRATED`, the work is done — return to intake with the new
+   path.
+3. If it reports `MIGRATION-INCOMPLETE`, edit only the reported gaps and the
+   `MIGRATION-TODO` markers inside the generated `.v1.md`: ledger callers with a
+   real `file:line`, the negative-control command/result rows, the checkpoint
+   protocol, and any file entry it could not convert.
+
+Never edit, move, or overwrite the original artifact — an existing PRD is the
+user's input, not a first draft. Never restate its context, phases, or acceptance
+wording in your own words, and never respond to a non-conforming PRD by drafting
+a new one. If a gap needs information the document does not contain, ask once.
+Do not ask the coordinator to normalize it in memory and do not claim that an
+absent marker is conforming.
 
 ## Runtime boundary
 

@@ -15,9 +15,14 @@ prd_contract: v1
 ---
 ```
 
+Additional front-matter keys are allowed; the exact `prd_contract: v1` line is
+not optional.
+
 The marker is not a license to repair an incomplete document in the coordinator.
-When it is absent or malformed, intake routes the artifact to creator upgrade
-mode and waits for a durable replacement.
+When it is absent or malformed, intake runs `scripts/linchpin.sh migrate` and
+waits for a durable replacement artifact. Migration writes the marker only when
+the migrated artifact already satisfies every rule below; a document with gaps is
+written without the marker and reports `MIGRATION-INCOMPLETE`.
 
 ## Required sections
 
@@ -29,8 +34,11 @@ A conforming artifact contains these headings, in this order:
 4. `## Acceptance Criteria`
 5. `## Checkpoint Protocol`
 
-The headings may contain additional context, but the named sections cannot be
-omitted, renamed, or replaced by an in-flight coordinator summary.
+A heading may carry a leading number (`## 4. Execution Phases`) and trailing
+context (`## Acceptance Criteria (consumer-scoped)`), but the named sections
+cannot be omitted, renamed, or replaced by an in-flight coordinator summary.
+`## Acceptance` is a rename, not trailing context; `scripts/linchpin.sh migrate`
+repairs that mechanically.
 
 ## Integration Ledger
 
@@ -121,4 +129,5 @@ The coordinator performs these checks before delegation:
 5. reject a brief if any source row is missing.
 
 This contract has no legacy-normalize branch. The only non-conforming path is
-creator upgrade mode described in `references/intake.md`.
+the migration and creator upgrade mode described in `references/intake.md`, and
+it always leaves the original artifact untouched on disk.

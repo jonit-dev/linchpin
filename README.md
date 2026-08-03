@@ -27,9 +27,32 @@ repository's `.agents/plugins/marketplace.json` is present.
 2. Intake reads `references/intake.md`, applies the complexity floor, and checks
    the local capability preflight.
 3. Creator output stops for explicit confirmation. Non-conforming PRDs go
-   through durable creator upgrade mode.
+   through durable migration and creator upgrade mode; the original file is
+   never edited or replaced.
 4. The coordinator preserves the Integration Ledger, acceptance criteria,
    negative controls, and checkpoint protocol in every worker brief.
+
+"start", "begin", "launch", and "resume" are execution verbs. Naming PRDs you
+already wrote never triggers PRD authoring.
+
+## Bring an existing PRD up to the contract
+
+```sh
+sh scripts/linchpin.sh migrate docs/PRDs/PRD-007-example.md
+```
+
+Migration reads the original and never writes to it. It produces
+`PRD-007-example.v1.md` with the required headings renamed, prose `**Files:**`
+paragraphs rewritten as parseable `Files (N)` lists, and any missing section
+scaffolded, then reports one of:
+
+- `MIGRATED` — the artifact carries `prd_contract: v1` and is ready to route;
+- `MIGRATION-INCOMPLETE` — the marker was withheld and every remaining gap is
+  listed, including each `MIGRATION-TODO` line. Gaps that need real evidence
+  (a gate's exact command, a caller's `file:line`) belong to an author, not to
+  the parser.
+
+`sh scripts/linchpin.sh contract <prd>` reports every problem in one run.
 
 Omit `.linchpin.toml` for zero-config defaults. If present, it can set
 `execution`, `delivery`, `base`, `review`, `max_lanes`, and `prd_floor` as
