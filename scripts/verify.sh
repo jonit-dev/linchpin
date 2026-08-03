@@ -54,10 +54,15 @@ elif ! jq empty "$repo_root/.codex-plugin/plugin.json" >/dev/null 2>&1; then
   fail 'plugin manifest is not valid JSON'
 else
   if ! jq -e '
-    (keys | sort) == ["description", "interface", "name", "skills", "version"] and
+    (keys | sort) == ["author", "description", "interface", "keywords", "license", "name", "repository", "skills", "version"] and
     .name == "linchpin" and
     .skills == "./skills/" and
-    (.interface.defaultPrompt | type == "string" and contains("one or many"))
+    .repository == "https://github.com/jonit-dev/linchpin" and
+    .license == "MIT" and
+    (.author.name | type == "string" and length > 0) and
+    (.interface.displayName | type == "string" and length > 0) and
+    (.interface.capabilities | type == "array" and length > 0) and
+    (.interface.defaultPrompt | type == "array" and length > 0 and any(.[]; contains("one or more") or contains("one or many")))
   ' "$repo_root/.codex-plugin/plugin.json" >/dev/null 2>&1; then
     fail 'plugin manifest has an unverified schema or discovery prompt'
   fi

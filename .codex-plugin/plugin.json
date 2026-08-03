@@ -2,8 +2,34 @@
   "name": "linchpin",
   "version": "0.1.0",
   "description": "Codex-only PRD swarm orchestration with contract-preserving intake.",
+  "author": {
+    "name": "Linchpin contributors",
+    "url": "https://github.com/jonit-dev/linchpin"
+  },
+  "repository": "https://github.com/jonit-dev/linchpin",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "prd",
+    "swarm",
+    "orchestration"
+  ],
   "skills": "./skills/",
   "interface": {
-    "defaultPrompt": "Orchestrate a Sol/Luna swarm over one or many conforming PRDs."
+    "displayName": "Linchpin",
+    "shortDescription": "Contract-preserving PRD swarm orchestration",
+    "longDescription": "Route PRD creation and execution through a contract-preserving intake, then coordinate bounded Codex lanes with inherited gates, review, and explicit delivery states.",
+    "developerName": "Linchpin contributors",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/jonit-dev/linchpin",
+    "defaultPrompt": [
+      "Orchestrate one or more conforming PRDs with a Sol/Luna swarm.",
+      "Route a PRD request through the Linchpin intake contract.",
+      "Create or execute a contract-preserving PRD workflow."
+    ]
   }
 }
