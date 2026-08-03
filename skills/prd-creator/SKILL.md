@@ -11,7 +11,8 @@ When this skill activates: `Planning Mode: Principal Architect`
 
 ## Contracted PRD output
 
-Read `references/prd-contract.md` from the linchpin plugin before writing a PRD;
+The `references/` directory is at the plugin root, beside `skills/`; from this
+file resolve it as `../../references/`. Read `references/prd-contract.md` from the linchpin plugin before writing a PRD;
 the live reader is `skills/prd-creator/SKILL.md:14`. Validate a candidate with
 `scripts/linchpin.sh contract <prd-path>` before announcing conformance.
 Every generated PRD must declare conformance with this exact front matter at the

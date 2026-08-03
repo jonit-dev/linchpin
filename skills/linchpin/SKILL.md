@@ -5,7 +5,8 @@ description: Route PRD creation, upgrade, and execution requests through the lin
 
 # linchpin router
 
-Read `references/intake.md` before dispatch. This skill is a thin entry point;
+The `references/` directory is at the plugin root, beside `skills/`; from this
+file resolve it as `../../references/`. Read `references/intake.md` before dispatch. This skill is a thin entry point;
 the intake reference owns the rules. The runtime pins are in
 `references/runtime.md`, and the manager uses `scripts/linchpin.sh` for the
 machine-checkable preflight, contract, and mode decisions.

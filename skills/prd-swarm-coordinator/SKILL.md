@@ -10,7 +10,8 @@ license: MIT
 
 Own one or many PRDs through the same intake, brief, scheduling, worker,
 review, repair, and delivery path. A single PRD is a swarm of one; it does not
-take a shortcut. Read `references/prd-contract.md` and
+take a shortcut. The `references/` directory is at the plugin root, beside
+`skills/`; from this file resolve it as `../../references/`. Read `references/prd-contract.md` and
 `references/intake.md` before intake, and read `references/runtime.md` before
 any preflight or delegation. The live contract consumer is
 `skills/prd-swarm-coordinator/SKILL.md:13`; the executable contract check is
