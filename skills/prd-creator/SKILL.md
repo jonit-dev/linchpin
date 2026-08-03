@@ -29,6 +29,10 @@ in its verification evidence. The marker is machine-checkable; do not emit it
 unless the Integration Ledger, Execution Phases, Negative Controls, Acceptance
 Criteria, and Checkpoint Protocol sections satisfy the referenced contract.
 
+Use the referenced documents and `scripts/linchpin.sh` subcommands as interfaces:
+invoke the specific check you need and inspect its output; do not read the full
+helper source into context.
+
 ## Intake and execution boundary
 
 Read `references/intake.md` before routing a request. A score of 2 or less is a

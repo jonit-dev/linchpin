@@ -28,6 +28,10 @@ This skill does not support generic non-PRD swarm requests. It does not arm the
 optional goal loop, because that requires a real Phase 1-6 merge checkpoint and
 an explicit user request that this local run does not have.
 
+Use the referenced documents and `scripts/linchpin.sh` subcommands as interfaces:
+invoke the specific check you need and inspect its output; do not read the full
+helper source into context.
+
 ## Intake branch
 
 1. Read the complete input artifact and validate `prd_contract: v1` with

@@ -21,6 +21,7 @@ no-task-delegation.sh
 manifest-valid.sh
 marketplace-valid.sh
 skills-discoverable.sh
+helper-context-boundary.sh
 router-matches-intake.sh
 router-not-a-gate.sh
 no-duplicate-skills.sh
