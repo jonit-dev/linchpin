@@ -33,6 +33,12 @@ Use the referenced documents and `scripts/linchpin.sh` subcommands as interfaces
 invoke the specific check you need and inspect its output; do not read the full
 helper source into context.
 
+Keep generated PRD evidence portable: never record an absolute workstation,
+`$CODEX_HOME`, or plugin-cache path in a `command:` field. Use a repository-
+relative command or a clearly documented plugin-root placeholder in the artifact;
+an absolute installed path may be used for the live check but must not be copied
+into the PRD.
+
 ## Intake and execution boundary
 
 Read `references/intake.md` before routing a request. A score of 2 or less is a
