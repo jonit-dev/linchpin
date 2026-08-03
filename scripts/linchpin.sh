@@ -540,8 +540,17 @@ route() {
   intent=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
   [ -n "$intent" ] || die 'route needs an intent'
   shift
-  score="${1:-}"
-  [ "$#" -gt 0 ] && shift
+  score=
+  if printf '%s' "$intent" | grep -Eq 'build|implement'; then
+    score="${1:-}"
+    [ "$#" -gt 0 ] && shift
+  elif printf '%s' "$intent" | grep -Eq 'run|execute' &&
+       [ "$#" -gt 0 ] && printf '%s' "$1" | grep -Eq '^[0-9]+$'; then
+    # Keep compatibility with the old helper shape while allowing the
+    # documented execute form: route execute PRD [PRD ...].
+    score="$1"
+    shift
+  fi
   config_dir="${LINCHPIN_CONFIG_DIR:-$PWD}"
   prd_list=$(mktemp "${TMPDIR:-/tmp}/linchpin-route.XXXXXX")
   trap 'rm -f -- "$prd_list"' EXIT HUP INT TERM
