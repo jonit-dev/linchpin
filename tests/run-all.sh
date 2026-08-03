@@ -19,6 +19,7 @@ no-stray-pins.sh
 preflight-model.sh
 no-task-delegation.sh
 manifest-valid.sh
+marketplace-valid.sh
 skills-discoverable.sh
 router-matches-intake.sh
 router-not-a-gate.sh

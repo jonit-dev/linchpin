@@ -1,0 +1,21 @@
+{
+  "name": "linchpin",
+  "interface": {
+    "displayName": "Linchpin"
+  },
+  "plugins": [
+    {
+      "name": "linchpin",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/jonit-dev/linchpin.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

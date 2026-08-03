@@ -5,18 +5,21 @@ through one contract-preserving swarm path. The current session is the manager;
 workers run in isolated lanes where possible, and each lane receives one
 read-only review before delivery.
 
-## Install
+## Install from GitHub
 
-The repository is ready for a user-confirmed local plugin install:
+Register the GitHub repository as a marketplace, then install the plugin:
 
 ```sh
-codex plugin marketplace add /path/to/linchpin-plugin
+codex plugin marketplace add https://github.com/jonit-dev/linchpin.git --ref main
 codex plugin add linchpin@linchpin
 ```
 
 Start a fresh Codex task after installation. Invoke `$linchpin` for intake, or
 invoke `$prd-creator` and `$prd-swarm-coordinator` directly. The router is a
 convenience entry point, not a prerequisite for either direct skill.
+
+For a local checkout, replace the GitHub URL with the checkout path after the
+repository's `.agents/plugins/marketplace.json` is present.
 
 ## Use
 

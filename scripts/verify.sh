@@ -24,10 +24,28 @@ require_file "$repo_root/skills/prd-swarm-coordinator/SKILL.md"
 require_file "$repo_root/skills/linchpin/SKILL.md"
 require_file "$repo_root/scripts/linchpin.sh"
 require_file "$repo_root/.codex-plugin/plugin.json"
+require_file "$repo_root/.agents/plugins/marketplace.json"
 require_file "$repo_root/.github/workflows/verify.yml"
 
 if [ -e "$repo_root/skills/prd-executor" ]; then
   fail "retired executor skill still exists: skills/prd-executor"
+fi
+
+if command -v jq >/dev/null 2>&1 && [ -f "$repo_root/.agents/plugins/marketplace.json" ]; then
+  if ! jq -e '
+    (keys | sort) == ["interface", "name", "plugins"] and
+    .name == "linchpin" and
+    (.plugins | length) == 1 and
+    .plugins[0].name == "linchpin" and
+    .plugins[0].source.source == "url" and
+    .plugins[0].source.url == "https://github.com/jonit-dev/linchpin.git" and
+    .plugins[0].source.ref == "main" and
+    .plugins[0].policy.installation == "AVAILABLE" and
+    .plugins[0].policy.authentication == "ON_INSTALL" and
+    .plugins[0].category == "Productivity"
+  ' "$repo_root/.agents/plugins/marketplace.json" >/dev/null 2>&1; then
+    fail 'GitHub marketplace manifest is invalid or does not point at linchpin'
+  fi
 fi
 
 if ! command -v jq >/dev/null 2>&1; then
