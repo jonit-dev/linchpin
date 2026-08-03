@@ -25,11 +25,14 @@ machine-checkable preflight, contract, and mode decisions.
 
 ## Dispatch procedure
 
-1. Identify the user's intent before looking at repository state. `start`,
-   `begin`, `launch`, and `resume` are execution verbs. A request naming PRDs
-   that already exist is never an authoring request; do not draft a new PRD, a
-   companion, or a corrected copy of one. Classify with
-   `scripts/linchpin.sh route "<intent>" <prd-path>...` instead of guessing.
+1. Run `scripts/linchpin.sh route "<intent>" <prd-path>...` **before** you plan
+   or announce anything. `start`, `begin`, `launch`, and `resume` are execution
+   verbs. A request naming PRDs that already exist is never an authoring
+   request; do not draft a new PRD, a companion, or a corrected copy of one.
+   Normalize the argv first: split quoted paths that ran together, and read a
+   bare `.` or other directory as the target repository, not as a missing PRD.
+   A path that is missing blocks itself, not the batch — route the survivors and
+   ask once about the one that is gone.
 2. Compute the complexity score for build/implement requests. Route scores 1–2
    to a direct edit refusal; route scores 3+ to creator and stop for explicit
    confirmation.

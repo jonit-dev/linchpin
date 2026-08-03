@@ -13,9 +13,8 @@ review, repair, and delivery path. A single PRD is a swarm of one; it does not
 take a shortcut. The `references/` directory is at the plugin root, beside
 `skills/`; from this file resolve it as `../../references/`. Read `references/prd-contract.md` and
 `references/intake.md` before intake, and read `references/runtime.md` before
-any preflight or delegation. The live contract consumer is
-`skills/prd-swarm-coordinator/SKILL.md:13`; the executable contract check is
-`scripts/linchpin.sh:313`.
+any preflight or delegation. The executable checks live in
+`scripts/linchpin.sh`.
 
 The manager is the current session's Sol/medium role. Workers, repair workers,
 integration workers, and conflict workers use the Luna/max role only through
@@ -24,9 +23,8 @@ fresh Sol/medium `codex exec --sandbox read-only` process. Never use a native
 subagent for Luna, never change tier after a failed attempt, and use
 `codex exec resume <session-id>` only for a recorded continuation.
 
-This skill does not support generic non-PRD swarm requests. It does not arm the
-optional goal loop, because that requires a real Phase 1-6 merge checkpoint and
-an explicit user request that this local run does not have.
+This skill does not support generic non-PRD swarm requests, and it does not arm
+the optional goal loop.
 
 Use the referenced documents and `scripts/linchpin.sh` subcommands as interfaces:
 invoke the specific check you need and inspect its output; do not read the full
@@ -73,8 +71,11 @@ is a named degradation unless the user explicitly forced the unavailable mode.
 
 ## Contract-preserving worker brief
 
-Generate each brief with the resolved lane metadata:
-`scripts/linchpin.sh brief <prd> <lane-id> <lane-mode> <delivery-mode>`.
+Generate each brief with the resolved lane metadata, writing it to a file:
+`scripts/linchpin.sh brief <prd> <lane-id> <lane-mode> <delivery-mode> --out <brief-file>`,
+then verify it with `scripts/linchpin.sh brief-check <prd> <brief-file>` and
+pass that file's contents as the worker prompt. The brief is the handoff; a
+prompt you compose yourself instead is a dropped ledger and a dropped scope rule.
 Resolve these values before invocation from `.linchpin.toml`, the
 file-intersection group, and delivery capability. With no config file, the
 helper's `brief <prd>` form remains a lane-1/parallel/pr default for direct
@@ -102,6 +103,10 @@ builds the file-intersection graph and emits one group per connected component:
 
 - disjoint groups use parallel worktrees when worktree creation succeeds;
 - groups with intersecting file sets run sequentially, one lane at a time;
+- a PRD with no `Files (N)` list has its set derived from its prose `**Files:**`
+  paragraphs, for grouping only — the file on disk is never rewritten;
+- a PRD that declares no file set at all takes its own group with its isolation
+  announced as unproven; it never drags the rest of the batch into its queue;
 - explicit sequential mode makes all groups sequential;
 - explicit parallel mode fails loudly on intersection or worktree failure;
 - auto mode degrades only the affected group and announces the reason;
@@ -110,10 +115,12 @@ builds the file-intersection graph and emits one group per connected component:
 - one lane uses the same output, gate, review, and delivery fields as any other
   group and has no special branch.
 
-If `git worktree add` fails or the shared tree cannot be safely stashed, run
-`scripts/linchpin.sh schedule auto fail [--config-dir <target-repo>] ...`,
-announce the sequential fallback before starting the first lane, and preserve
-the same brief and gates. The schedule output identifies active and queued
+When a group must degrade, run `scripts/linchpin.sh schedule auto <status>
+[--config-dir <target-repo>] ...` with the status that actually happened —
+`worktree-fail`, `dirty-tree`, `unparsed-files`, or `config`. Attempt the real
+`git worktree add` before you claim it failed; the announcement the user reads
+must name the true reason. Announce the sequential fallback before starting the
+first lane, and preserve the same brief and gates. The schedule output identifies active and queued
 lanes under `max_lanes`. Never abort a normal auto run for unavailable
 isolation. For a forced parallel run, fail with the exact capability error so
 the user can correct the environment.
@@ -124,20 +131,39 @@ sequential.
 
 ## Lane lifecycle
 
-For every lane, record the PRD, slug, baseline, branch, worktree or shared-tree
+Keep a run ledger at `.linchpin/run-<timestamp>.md` in the target repository,
+written before the first worker starts and updated as each lane changes state.
+For every lane record the PRD, slug, baseline, branch, worktree or shared-tree
 mode, file set, overlap group, dependencies, process id, subprocess session id,
-brief hash, verification commands, review state, repair rounds, delivery mode,
-and terminal evidence in the external run ledger.
+brief path, verification commands, review state, repair rounds, delivery mode,
+and terminal evidence. A run with no ledger file on disk is not resumable, and
+an unresumable run is not a run.
 
-1. Create every parallel lane from the same detected base branch. Never branch a
-   lane from another lane.
+1. **Every lane gets its own branch**, sequential ones included:
+   `git switch -c linchpin/<lane-slug>` from the same detected base branch.
+   Never branch a lane from another lane, and never let a worker commit onto the
+   branch the user had checked out. Sequential means one lane at a time in the
+   shared tree; it never means committing onto the user's working branch.
 2. Launch workers using only the Worker row in `references/runtime.md`. Pin the
-   required effort and working directory in the subprocess invocation. Do not
-   inherit session defaults or route code edits through another runtime.
+   required effort and working directory in the subprocess invocation, and pass
+   the generated brief file as the prompt. Do not inherit session defaults, do
+   not retype the brief into a prompt of your own, and do not route code edits
+   through another runtime.
 3. Require a worker commit, exact test output, caller census, revert check, and
    gate evidence before manager verification.
 4. Keep a partial lane and its worktree. A timeout or worker summary is not a
    delivery result; inspect the actual diff and resume from the recorded state.
+5. A lane that ends `PARTIAL` or `BLOCKED` releases its group's queue. The next
+   queued lane starts; the batch does not stall behind a lane that is done
+   failing.
+
+### Awaiting a lane
+
+A lane takes minutes, and its progress prose is not evidence you will act on.
+Record the session id at launch, redirect worker output to a log, then poll on a
+backoff — roughly two minutes, then five — instead of a tight loop of short
+waits. Read the log when the process exits, not while it runs. Process exit and
+the real diff are the only two signals worth a turn.
 
 ## Inherited lane gates
 
@@ -161,6 +187,12 @@ Run `scripts/linchpin.sh gate <prd> <report>` before delivery. A report with
 only green assertions, a missing control, or a missing observed-red line is
 `UNVERIFIED` and rejected. Every control must have failed as expected at least
 once. This rule is identical in parallel and sequential mode.
+
+When the PRD declares no Negative Controls, `gate` reports
+`GATES-NOT-DECLARED` and delivery proceeds on the verification the PRD *does*
+declare. Do not invent controls the author never wrote, and do not hold a lane
+because a section is absent. The inherited-gate rule binds the controls a PRD
+declares; it never manufactures new ones.
 
 The reviewer packet must contain the negative-control table even when all
 functional tests are green. The manager records the exact red command and its
@@ -209,12 +241,16 @@ because a process exited, a summary said done, or a green-only test suite ran.
 
 ## Final controller verification
 
-Before handing off, inspect the real branch or shared-tree diff, run the named
-repository gates, run `sh scripts/verify.sh`, run `jq` validation, run
-`shellcheck` when installed, and perform a local smoke check of contract,
-brief, mode, fallback, and gate commands. Run exactly one fresh Sol review only
-when the manager executes the real user workflow; this implementation handoff
-does not start that review.
+Before handing off, inspect the real branch or shared-tree diff and run the
+gates the **target repository** names — its own test, lint, typecheck, and build
+commands, discovered from that repository. Linchpin's own repository scripts
+(`scripts/verify.sh`, its shellcheck and jq checks) are for developing this
+plugin; never run them inside a user's repository.
+
+Confirm the diff contains only the files the PRD's scope covers. An unrelated
+deletion, an unrelated dependency bump, or an unrelated doc edit that arrived
+inside a lane commit is a finding, not a bonus: name it, and get the worker's
+own commit narrowed before delivery.
 
 The final report maps every PRD criterion and every ledger row to a command,
 file:line, or captured result. It names observed-red failures, unresolved

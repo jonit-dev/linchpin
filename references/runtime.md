@@ -8,8 +8,13 @@ plugin. Skills refer here; they do not copy these values into their own bodies.
 | Role | Model | Effort | Mechanism | Responsibility |
 |---|---|---|---|---|
 | Manager | `gpt-5.6-sol` | `medium` | current Codex session | intake, briefs, scheduling, evidence, integration |
+| Author | `gpt-5.6-sol` | `high` | `codex exec` | authoring a new PRD in `prd-creator` |
 | Worker | `gpt-5.6-luna` | `max` | `codex exec` | implementation, repair, tests, conflict resolution |
 | Reviewer | `gpt-5.6-sol` | `medium` | `codex exec --sandbox read-only` | one independent review per lane |
+
+Writing a PRD is the decision that every lane inherits, so it runs at the
+Author row's higher effort rather than the manager's. Upgrade mode and any
+gap-filling pass use the same row.
 
 ## Delegation rules
 
@@ -32,10 +37,16 @@ plugin. Skills refer here; they do not copy these values into their own bodies.
 The role values above are substituted into these shapes at runtime:
 
 ```text
-<codex> exec --model <Worker.Model> -c 'model_reasoning_effort="<Worker.Effort>"' -C <lane> <brief>
+<codex> exec --model <Worker.Model> -c 'model_reasoning_effort="<Worker.Effort>"' -C <lane> "$(cat <brief-file>)"
+<codex> exec --model <Author.Model> -c 'model_reasoning_effort="<Author.Effort>"' -C <repo> "$(cat <creator-brief>)"
 <codex> exec --model <Reviewer.Model> -c 'model_reasoning_effort="<Reviewer.Effort>"' --sandbox read-only -C <lane> <review>
 <codex> exec resume <session-id>
 ```
+
+The worker prompt is the generated brief, passed from the file
+`scripts/linchpin.sh brief ... --out <brief-file>` wrote. Do not retype or
+summarize it into a prompt of your own: a hand-written prompt drops the ledger,
+the controls, and the scope rule the brief exists to carry.
 
 The reviewer is never the worker's continuation. There is exactly one fresh
 review per PRD; Luna repairs findings and the manager verifies closure.

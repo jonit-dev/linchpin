@@ -35,6 +35,13 @@ repository's `.agents/plugins/marketplace.json` is present.
 "start", "begin", "launch", and "resume" are execution verbs. Naming PRDs you
 already wrote never triggers PRD authoring.
 
+Point Linchpin at whatever you already have. A PRD that predates the contract
+runs as written: its file set is read from the prose paragraphs that name it, a
+section it never declared is reported absent instead of invented, and delivery
+is gated on the controls it does declare. One missing path asks about that path;
+the rest of the batch still runs. Run `sh scripts/linchpin.sh help` for the
+subcommands.
+
 ## Bring an existing PRD up to the contract
 
 ```sh
@@ -78,7 +85,5 @@ one-to-many path; there is no shipped duplicate executor skill.
 
 ## v1 boundary
 
-Claude Code support, patch delivery, a third model tier, cross-lane dependency
-ordering, and the optional goal loop are not shipped. The goal loop cannot start
-until a real local Phase 1-6 merge checkpoint exists and the user explicitly
-requests it; this no-remote implementation run makes no such claim.
+Claude Code support, patch delivery, cross-lane dependency ordering, and the
+optional goal loop are not shipped.

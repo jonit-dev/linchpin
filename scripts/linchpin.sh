@@ -137,6 +137,26 @@ files_list() {
   ' "$1"
 }
 
+prose_files() {
+  # A user's PRD often declares its files in a prose `**Files:**` paragraph
+  # instead of a machine-readable `Files (N)` list. The author still named the
+  # paths, so read them rather than declaring the whole batch unknowable. This
+  # is a derived set: it is announced as advisory and never silently trusted as
+  # a conformance result.
+  require_file "$1"
+  awk '
+    /^\*\*Files:\*\*/ { buffer = buffer " " $0; active = 1; next }
+    active && NF == 0 { active = 0; next }
+    active { buffer = buffer " " $0; next }
+    { next }
+    END { print buffer }
+  ' "$1" |
+    tr '`' '\n' |
+    awk 'NR % 2 == 0' |
+    grep -E '^[A-Za-z0-9_.][A-Za-z0-9_./-]*\.[A-Za-z0-9]+$' |
+    sort -u
+}
+
 ledger_block() {
   section_block "$1" 'Integration Ledger'
 }
@@ -607,6 +627,7 @@ brief() {
   lane_id="${LINCHPIN_LANE_ID:-lane-1}"
   lane_mode="${LINCHPIN_LANE_MODE:-}"
   delivery_mode="${LINCHPIN_DELIVERY_MODE:-}"
+  brief_out=
   positional_count=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -617,6 +638,15 @@ brief() {
         ;;
       --config-dir=*)
         config_dir=${1#*=}
+        shift
+        ;;
+      --out)
+        [ "$#" -ge 2 ] || die '--out needs a path'
+        brief_out="$2"
+        shift 2
+        ;;
+      --out=*)
+        brief_out=${1#*=}
         shift
         ;;
       --lane-id)
@@ -684,6 +714,21 @@ brief() {
   case "$delivery_mode" in pr|branch) ;; *) die "delivery mode must be pr or branch: $delivery_mode" ;; esac
   require_file "$prd"
   runtime_metadata
+  if [ -n "$brief_out" ]; then
+    # A brief the manager has to retype into a prompt is a brief that gets
+    # dropped. Write it to a file the worker invocation can read.
+    brief_emit "$prd" "$lane_id" "$lane_mode" "$delivery_mode" > "$brief_out"
+    printf 'BRIEF-WRITTEN %s\n' "$brief_out"
+    return
+  fi
+  brief_emit "$prd" "$lane_id" "$lane_mode" "$delivery_mode"
+}
+
+brief_emit() {
+  prd="$1"
+  lane_id="$2"
+  lane_mode="$3"
+  delivery_mode="$4"
   printf '%s\n' 'WORKER BRIEF: contract-preserving lane'
   printf 'Source PRD: %s\n' "$prd"
   printf 'Lane identity: %s\n' "$lane_id"
@@ -693,7 +738,11 @@ brief() {
   else
     printf '%s\n' '- UNPARSED: this PRD does not use machine-readable `Files (N)` lists.' \
       '- Read the phase file lists in the PRD itself and follow them as written.' \
-      '- The lane runs sequentially because its file set cannot be proved disjoint.'
+      '- Its lane is grouped from the paths it names in prose, or alone if it names none.'
+    if brief_derived=$(prose_files "$prd" 2>/dev/null) && [ -n "$brief_derived" ]; then
+      printf '%s\n' '- Derived from prose (grouping only, not a substitute for the PRD):'
+      printf '%s\n' "$brief_derived" | sed 's/^/  - /'
+    fi
   fi
   printf '%s\n' '' '## Integration Ledger (verbatim)'
   brief_section "$prd" 'Integration Ledger'
@@ -710,7 +759,8 @@ brief() {
   printf 'Lane mode: %s\n' "$lane_mode"
   printf 'Delivery mode: %s\n' "$delivery_mode"
   printf '%s\n' 'Prohibited actions: native Luna spawning; runtime tier changes; unsafe external install/swap actions'
-  printf '%s\n' 'Gate rule: every negative control needs observed-red evidence before delivery.'
+  printf '%s\n' 'Scope rule: change only the files this PRD covers. Do not delete, move, or edit an unrelated file, do not bump an unrelated dependency, and do not bundle unrelated work into this lane commit. Something outside scope that looks wrong is a note in your report, not an edit.'
+  printf '%s\n' 'Gate rule: every negative control this PRD declares needs observed-red evidence before delivery. A control the PRD never declared is not invented here.'
 }
 
 brief_check() {
@@ -731,7 +781,7 @@ brief_check() {
   [ "$metadata_count" -eq 1 ] || die 'worker brief delivery mode is missing or duplicated'
   metadata_count=$(grep -Ec '^Delivery mode: (pr|branch)$' "$brief_file" || true)
   [ "$metadata_count" -eq 1 ] || die 'worker brief delivery mode is malformed'
-  for metadata_prefix in 'Worker runtime:' 'Reviewer runtime:' 'Runtime invocation:' 'Prohibited actions:'; do
+  for metadata_prefix in 'Worker runtime:' 'Reviewer runtime:' 'Runtime invocation:' 'Prohibited actions:' 'Scope rule:'; do
     metadata_count=$(grep -Fc "$metadata_prefix" "$brief_file" || true)
     [ "$metadata_count" -eq 1 ] || die "worker brief metadata is missing or duplicated: $metadata_prefix"
   done
@@ -739,6 +789,7 @@ brief_check() {
   require_exact_line "Reviewer runtime: $reviewer_runtime" "$brief_file" || die 'worker brief Reviewer runtime metadata is missing or stale'
   require_exact_line "Runtime invocation: worker=$worker_invocation; reviewer=$reviewer_invocation" "$brief_file" || die 'worker brief runtime invocation is missing or stale'
   require_exact_line 'Prohibited actions: native Luna spawning; runtime tier changes; unsafe external install/swap actions' "$brief_file" || die 'worker brief prohibited-actions metadata is missing or malformed'
+  require_exact_line 'Scope rule: change only the files this PRD covers. Do not delete, move, or edit an unrelated file, do not bump an unrelated dependency, and do not bundle unrelated work into this lane commit. Something outside scope that looks wrong is a note in your report, not an edit.' "$brief_file" || die 'worker brief scope rule is missing or malformed'
 
   brief_temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/linchpin-brief-check.XXXXXX")
   trap 'rm -rf -- "$brief_temp_dir"' EXIT HUP INT TERM
@@ -855,26 +906,41 @@ route() {
     fi
     # A PRD the user points at is executed as written. The contract is a creator
     # standard for artifacts Linchpin authors, never an admission gate on the
-    # user's own document. The only execution blocker is a path that is not there.
+    # user's own document. The only execution blocker is a path that is not there
+    # — and it blocks that one path, not the batch beside it.
+    found_list=$(mktemp "${TMPDIR:-/tmp}/linchpin-route-found.XXXXXX")
     missing=0
     while IFS= read -r prd; do
       [ -n "$prd" ] || continue
-      if [ ! -f "$prd" ]; then
+      if [ -d "$prd" ]; then
+        # A directory in an execute argv is a target-repository hint, not a PRD.
+        printf 'ADVISORY %s is a directory, not a PRD; read as the target repository.\n' "$prd"
+        continue
+      fi
+      if [ -f "$prd" ]; then
+        printf '%s\n' "$prd" >> "$found_list"
+      else
         printf 'MISSING-PRD-PATH %s (resolved from %s)\n' "$prd" "$PWD"
         missing=1
       fi
     done < "$prd_list"
-    if [ "$missing" -eq 1 ]; then
+    found_count=$(wc -l < "$found_list" | tr -d ' ')
+    if [ "$found_count" -eq 0 ]; then
+      rm -f -- "$found_list"
       printf '%s\n' 'ROUTE-EXECUTE-NONE -> ask-once'
       return
     fi
     printf '%s\n' 'ROUTE-EXECUTE-CONFORMING -> prd-swarm-coordinator'
+    if [ "$missing" -eq 1 ]; then
+      printf '%s\n' 'ADVISORY route the paths above that exist; ask once about the missing one instead of stopping the batch.'
+    fi
     while IFS= read -r prd; do
       [ -n "$prd" ] || continue
       if ! sh "$script_dir/linchpin.sh" contract "$prd" >/dev/null 2>&1; then
         printf 'ADVISORY %s does not carry prd_contract: v1; execute it as written. Do not rewrite it, and do not migrate it unless the user asks.\n' "$prd"
       fi
-    done < "$prd_list"
+    done < "$found_list"
+    rm -f -- "$found_list"
     return
   fi
   printf '%s\n' 'ROUTE-AMBIGUOUS -> ask-once'
@@ -918,13 +984,20 @@ mode_selection() {
     if files_list "$prd" 2>/dev/null | sort -u > "$temp_dir/files-$index" &&
        [ -s "$temp_dir/files-$index" ]; then
       printf '0\n' > "$temp_dir/unparsed-$index"
+    elif prose_files "$prd" > "$temp_dir/files-$index" 2>/dev/null &&
+         [ -s "$temp_dir/files-$index" ]; then
+      # The author named the paths in prose instead of a `Files (N)` list. Read
+      # them for grouping only; the file on disk is never rewritten.
+      printf '0\n' > "$temp_dir/unparsed-$index"
+      printf 'ANNOUNCE: %s has no machine-readable Files (N) list; its file set was derived from its prose **Files:** paragraphs for grouping only.\n' "$prd"
     else
-      # An unparseable file list is never treated as disjoint. The PRD still
-      # executes; it just cannot claim an isolated lane.
+      # No declared file set at all. The lane cannot be proved disjoint from
+      # anything, so it takes its own group instead of dragging every other
+      # lane into one queue behind it.
       : > "$temp_dir/files-$index"
       printf '1\n' > "$temp_dir/unparsed-$index"
       unparsed_any=1
-      printf 'ANNOUNCE: %s has no machine-readable Files (N) list; its lane runs sequentially.\n' "$prd"
+      printf 'ANNOUNCE: %s declares no file set; its lane runs alone in its own group and its isolation is unproven.\n' "$prd"
     fi
     printf '%s\n' "$prd" > "$temp_dir/label-$index"
     index=$((index + 1))
@@ -935,8 +1008,7 @@ mode_selection() {
   while [ "$i" -le "$count" ]; do
     j=$((i + 1))
     while [ "$j" -le "$count" ]; do
-      if [ "$(cat "$temp_dir/unparsed-$i")" = 1 ] || [ "$(cat "$temp_dir/unparsed-$j")" = 1 ] ||
-         comm -12 "$temp_dir/files-$i" "$temp_dir/files-$j" | grep -q .; then
+      if comm -12 "$temp_dir/files-$i" "$temp_dir/files-$j" | grep -q .; then
         printf '%s %s\n' "$i" "$j" >> "$temp_dir/edges"
       fi
       j=$((j + 1))
@@ -946,6 +1018,9 @@ mode_selection() {
 
   if [ "$execution" = parallel ] && [ -s "$temp_dir/edges" ]; then
     die 'execution=parallel forced parallelism but Files (N) lists intersect'
+  fi
+  if [ "$execution" = parallel ] && [ "$unparsed_any" -eq 1 ]; then
+    die 'execution=parallel forced parallelism but a PRD declares no file set, so disjointness cannot be proved'
   fi
 
   awk -v n="$count" '
@@ -1009,7 +1084,17 @@ schedule() {
   worktree_status="$2"
   shift 2
   case "$requested_execution" in auto|parallel|sequential) ;; *) die "invalid execution: $requested_execution" ;; esac
-  case "$worktree_status" in ok|fail) ;; *) die "worktree status must be ok or fail" ;; esac
+  # The announced reason must be the reason that actually happened. `fail` stays
+  # for the worktree case it has always meant; the named statuses cover the other
+  # degradations without claiming a `git worktree add` that was never attempted.
+  case "$worktree_status" in
+    ok) ;;
+    fail|worktree-fail) fallback_reason='git worktree add failed' ;;
+    dirty-tree) fallback_reason='the working tree could not be safely stashed' ;;
+    unparsed-files) fallback_reason='the lane group declares no separable file set' ;;
+    config) fallback_reason='execution = "sequential" was configured' ;;
+    *) die 'worktree status must be ok, worktree-fail, dirty-tree, unparsed-files, or config' ;;
+  esac
   config_dir="${LINCHPIN_CONFIG_DIR:-$PWD}"
   lane_file=$(mktemp "${TMPDIR:-/tmp}/linchpin-schedule.XXXXXX")
   trap 'rm -f -- "$lane_file"' EXIT HUP INT TERM
@@ -1042,11 +1127,11 @@ schedule() {
     selected="$requested_execution"
     [ "$requested_execution" = parallel ] && forced_parallel=1
   fi
-  if [ "$worktree_status" = fail ]; then
+  if [ "$worktree_status" != ok ]; then
     if [ "$forced_parallel" -eq 1 ]; then
-      die 'execution=parallel forced worktrees, but git worktree add failed'
+      die "execution=parallel forced worktrees, but $fallback_reason"
     fi
-    printf '%s\n' 'ANNOUNCE: git worktree add failed; this lane group runs sequentially in the shared working tree.'
+    printf 'ANNOUNCE: %s; this lane group runs sequentially in the shared working tree.\n' "$fallback_reason"
     selected=sequential
   elif [ "$selected" = sequential ]; then
     printf '%s\n' 'ANNOUNCE: sequential execution was selected by configuration or collision analysis.'
@@ -1077,11 +1162,23 @@ schedule() {
 gate_evidence() {
   prd="$1"
   report="$2"
-  contract_check "$prd" >/dev/null
-  require_file "$report"
-  # Delivery is the point where the planned caller must have become a real one.
-  validate_ledger "$prd" delivered
+  require_file "$prd"
+  # The contract governs artifacts Linchpin authored. A user's own PRD is
+  # executed as written, so conformance is never an admission gate on delivery.
+  # What a PRD declares is still binding; what it never declared is not.
+  if marker_is_valid "$prd"; then
+    contract_check "$prd" >/dev/null
+    require_file "$report"
+    # Delivery is the point where the planned caller must have become a real one.
+    validate_ledger "$prd" delivered
+  else
+    require_file "$report"
+  fi
   expected_rows=$(negative_data "$prd")
+  if [ -z "$expected_rows" ] && ! marker_is_valid "$prd"; then
+    printf 'GATES-NOT-DECLARED %s declares no Negative Controls; deliver on the verification it does declare\n' "$prd"
+    return 0
+  fi
   actual_rows=$(awk -F '|' '
     function trim(value) {
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
@@ -1153,6 +1250,29 @@ preflight_model() {
   printf 'PREFLIGHT-PASS worker=%s mechanism=%s reviewer=%s cache=%s\n' "$worker_model" "$worker_mechanism" "$reviewer_mechanism" "$cache_path"
 }
 
+usage() {
+  cat <<'USAGE'
+linchpin.sh COMMAND [ARGS]
+
+  route INTENT [SCORE] [PRD ...] [--config-dir DIR]  classify a request
+  contract PRD                                       report every contract problem
+  migrate PRD [--out PATH] [--force]                 write a v1 copy; never edits PRD
+  brief PRD [LANE_ID LANE_MODE DELIVERY_MODE]        emit the worker brief
+        [--out PATH] [--config-dir DIR]
+  brief-check PRD BRIEF                              verify a brief against its PRD
+  files PRD                                          print the parsed Files (N) list
+  mode EXECUTION PRD... [--config-dir DIR]           group lanes by file collision
+  schedule EXECUTION STATUS LANE... [--config-dir DIR]
+        STATUS: ok | worktree-fail | dirty-tree | unparsed-files | config
+  gate PRD REPORT                                    check observed-red evidence
+  config [REPO]                                      print resolved .linchpin.toml
+  preflight [MODELS_CACHE.json]                      check the worker model
+  help                                               this text
+
+EXECUTION is auto, parallel, or sequential.
+USAGE
+}
+
 command_name="${1:-}"
 shift || true
 case "$command_name" in
@@ -1160,12 +1280,20 @@ case "$command_name" in
   migrate) [ "$#" -ge 1 ] || die 'usage: linchpin.sh migrate PRD [--out PATH] [--force]'; migrate "$@" ;;
   brief) [ "$#" -ge 1 ] || die 'usage: linchpin.sh brief PRD [LANE_ID LANE_MODE DELIVERY_MODE] [--config-dir DIR]'; brief "$@" ;;
   brief-check) [ "$#" -eq 2 ] || die 'usage: linchpin.sh brief-check PRD BRIEF'; brief_check "$1" "$2" ;;
-  files) [ "$#" -eq 1 ] || die 'usage: linchpin.sh files PRD'; files_list "$1" ;;
+  files)
+    [ "$#" -eq 1 ] || die 'usage: linchpin.sh files PRD'
+    if ! files_list "$1"; then
+      # Silence plus exit 1 reads as a broken helper. Say which of the two it is.
+      printf 'NO-FILES-LIST %s has no machine-readable `Files (N)` list; run `mode` for its derived set.\n' "$1" >&2
+      exit 1
+    fi
+    ;;
+  help|--help|-h) usage; exit 0 ;;
   config) [ "$#" -le 1 ] || die 'usage: linchpin.sh config [repo]'; config_values "${1:-${LINCHPIN_CONFIG_DIR:-$PWD}}" ;;
   route) [ "$#" -ge 1 ] || die 'usage: linchpin.sh route INTENT [SCORE] [PRD ...] [--config-dir DIR]'; route "$@" ;;
   mode) [ "$#" -ge 2 ] || die 'usage: linchpin.sh mode EXECUTION PRD...'; mode_selection "$@" ;;
   schedule) [ "$#" -ge 3 ] || die 'usage: linchpin.sh schedule EXECUTION WORKTREE_STATUS LANE...'; schedule "$@" ;;
   gate) [ "$#" -eq 2 ] || die 'usage: linchpin.sh gate PRD REPORT'; gate_evidence "$1" "$2" ;;
   preflight) [ "$#" -le 1 ] || die 'usage: linchpin.sh preflight [models_cache.json]'; preflight_model "${1:-}" ;;
-  *) die 'commands: contract, migrate, brief, files, config, route, mode, schedule, gate, preflight' ;;
+  *) usage >&2; exit 1 ;;
 esac

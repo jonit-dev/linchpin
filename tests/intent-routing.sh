@@ -35,5 +35,12 @@ esac
 missing_route=$(sh "$repo_root/scripts/linchpin.sh" route 'start these' "$tmp_dir/not-a-file.md")
 assert_contains "$missing_route" 'ROUTE-EXECUTE-NONE -> ask-once'
 assert_contains "$missing_route" 'MISSING-PRD-PATH'
+
+# ...and it blocks itself, not the batch beside it. A real paste carries a bare
+# directory and one path that moved; the survivors still run.
+partial_route=$(sh "$repo_root/scripts/linchpin.sh" route 'execute' . "$fixture" "$tmp_dir/not-a-file.md")
+assert_contains "$partial_route" 'MISSING-PRD-PATH'
+assert_contains "$partial_route" 'ROUTE-EXECUTE-CONFORMING -> prd-swarm-coordinator'
+assert_contains "$partial_route" 'is a directory, not a PRD'
 assert_contains "$(sh "$repo_root/scripts/linchpin.sh" route 'fix the typo' 5 "$fixture" "$fixture")" 'ROUTE-AMBIGUOUS -> ask-once'
 pass 'intent wins over PRD state and all routing-table branches are exercised'

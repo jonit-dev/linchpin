@@ -28,11 +28,12 @@ prd_contract: v1
 Additional front-matter keys are allowed; the exact `prd_contract: v1` line is
 not optional.
 
-The marker is not a license to repair an incomplete document in the coordinator.
-When it is absent or malformed, intake runs `scripts/linchpin.sh migrate` and
-waits for a durable replacement artifact. Migration writes the marker only when
-the migrated artifact already satisfies every rule below; a document with gaps is
-written without the marker and reports `MIGRATION-INCOMPLETE`.
+An absent or malformed marker on a user's document is not an execution blocker
+and not a migration trigger. It means this contract does not govern that
+document: run it as written, and read the sections it does have. Migration runs
+only when the user asks to standardize an artifact. Migration writes the marker
+only when the migrated artifact already satisfies every rule below; a document
+with gaps is written without the marker and reports `MIGRATION-INCOMPLETE`.
 
 ## Required sections
 
@@ -129,15 +130,22 @@ declare a gate passed from a green-only run.
 
 ## Coordinator transfer rule
 
-The coordinator performs these checks before delegation:
+The coordinator's job at delegation is transfer, not admission. For every PRD,
+conforming or not:
 
-1. verify the marker and required sections;
-2. parse every `Files (N)` list;
-3. validate every ledger row has a caller and negative control;
-4. copy the ledger, negative controls, acceptance criteria, and checkpoint
-   protocol without normalization into the worker brief;
-5. reject a brief if any source row is missing.
+1. copy whichever of the ledger, negative controls, acceptance criteria, and
+   checkpoint protocol the document declares, verbatim and without
+   normalization, into the worker brief;
+2. mark the sections the document does not declare `NOT DECLARED`, and carry the
+   PRD's own phases and file lists instead;
+3. parse every `Files (N)` list that exists; treat an unparseable or absent list
+   as non-disjoint and run that lane sequentially;
+4. reject a brief only when a section the source *does* declare arrived
+   incomplete — a dropped ledger row, caller, or control.
 
-This contract has no legacy-normalize branch. The only non-conforming path is
-the migration and creator upgrade mode described in `references/intake.md`, and
-it always leaves the original artifact untouched on disk.
+For a marked `prd_contract: v1` artifact, steps 1-4 additionally imply the full
+structural check, because Linchpin authored it to satisfy this contract. For a
+user's own document, a missing section is a fact about the document, never a
+refusal. This contract has no legacy-normalize branch: migration and creator
+upgrade mode run only when the user asks, and always leave the original artifact
+untouched on disk.

@@ -75,9 +75,12 @@ absent marker is conforming.
 
 ## Runtime boundary
 
-The role and delegation pins are owned by `references/runtime.md`. This planning
-skill does not select a model or spawn a native checkpoint process. It records
-checkpoint evidence for the manager to review through the runtime contract.
+The role and delegation pins are owned by `references/runtime.md`. Authoring
+runs on that file's **Author** row, at its higher effort — a PRD is the decision
+every lane inherits, so it is not written at the manager's default. Read the
+values there; never copy a model slug or effort into this file. This planning
+skill does not spawn a native checkpoint process. It records checkpoint evidence
+for the manager to review through the runtime contract.
 
 ---
 

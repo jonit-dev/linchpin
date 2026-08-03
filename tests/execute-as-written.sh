@@ -22,11 +22,33 @@ assert_contains "$(cat "$brief_file")" 'NOT DECLARED in this PRD'
 assert_contains "$(cat "$brief_file")" 'Lane mode: sequential'
 sh "$helper" brief-check "$raw" "$brief_file" >/dev/null || fail 'brief-check refused a raw plan'
 
-# A plan with no parseable file list can still be scheduled; it just never
-# claims an isolated lane.
+# A plan with no parseable `Files (N)` list still declared its paths in prose.
+# Read them for grouping so a legacy batch is not collapsed into one queue.
 mode_output=$(sh "$helper" mode auto "$raw" "$conforming")
-assert_contains "$mode_output" 'ANNOUNCE:'
-assert_contains "$mode_output" 'mode=sequential'
+assert_contains "$mode_output" 'derived from its prose'
+assert_contains "$mode_output" 'mode=parallel'
+
+# A document that declares no file set at all takes its own group and says so,
+# rather than dragging every other lane behind it.
+silent="$tmp_dir/no-files.md"
+printf '# Plan\n\nProse only. No file declaration anywhere.\n' > "$silent"
+silent_output=$(sh "$helper" mode auto "$silent" "$conforming")
+assert_contains "$silent_output" 'isolation is unproven'
+assert_contains "$silent_output" 'group=2'
+expect_failure 'forced parallel over a PRD that declares no file set' \
+  sh "$helper" mode parallel "$silent" "$conforming"
+
+# Delivery is not an admission gate either. A raw plan that never declared
+# Negative Controls reports them as not declared instead of blocking the lane.
+report="$tmp_dir/gate-report.md"
+printf '## Gate Evidence\n| Gate | Result | Observed-red evidence | Exact command/result |\n|---|---|---|---|\n' > "$report"
+gate_output=$(sh "$helper" gate "$raw" "$report") || fail 'gate refused a raw plan at delivery'
+assert_contains "$gate_output" 'GATES-NOT-DECLARED'
+
+# The controls a PRD *does* declare stay binding: green-only evidence is red.
+expect_failure 'green-only evidence against a declared control' \
+  sh "$helper" gate "$conforming" "$fixture_dir/gate-all-green.md"
+assert_contains "$(sh "$helper" gate "$conforming" "$fixture_dir/gate-observed-red.md")" 'GATES-PASS'
 
 # Observed red: a path that is not on disk is the one real execution blocker.
 expect_failure 'brief on a path that does not exist' sh "$helper" brief "$tmp_dir/absent.md"

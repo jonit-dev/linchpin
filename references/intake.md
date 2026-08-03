@@ -52,8 +52,11 @@ When a supplied PRD is non-conforming:
   `ADVISORY` line naming the artifact;
 - `scripts/linchpin.sh brief` transfers whatever sections exist verbatim and
   marks the rest `NOT DECLARED`. The worker follows the PRD's own phases;
-- a PRD with no machine-readable `Files (N)` list is never treated as disjoint.
-  Its lane runs sequentially and the reason is announced;
+- a PRD with no machine-readable `Files (N)` list still named its paths
+  somewhere. `mode` derives the set from its prose `**Files:**` paragraphs for
+  grouping only, announces that it did, and never rewrites the file. A PRD that
+  names no paths at all takes its own group with unproven isolation rather than
+  putting the whole batch in one queue behind it;
 - gates, acceptance, and checkpoints come from the PRD. Do not invent a gate the
   author did not ask for, and do not refuse delivery for a section the author
   never wrote.
@@ -61,8 +64,16 @@ When a supplied PRD is non-conforming:
 Say nothing about conformance unless the user asks. Never answer an execution
 request with a standards complaint.
 
-The only execution blocker is a path that is not on disk: report
-`MISSING-PRD-PATH`, ask once, and stop.
+The only execution blocker is a path that is not on disk, and it blocks that one
+path rather than the batch beside it: report `MISSING-PRD-PATH` for it, run the
+paths that do exist, and ask once about the missing one. `ROUTE-EXECUTE-NONE`
+means *nothing* the user named was found.
+
+Normalize the argv before routing. A user pastes real invocations: a bare `.`
+for "here", quoted paths that ran together without a separating space, a
+trailing directory. Split concatenated paths, read a directory as the target
+repository rather than a missing PRD, and hand the survivors to `route`. Do not
+answer a messy argv with a question you could have answered by reading it.
 
 ## Standardizing a PRD (only when the user asks)
 
@@ -145,6 +156,8 @@ sets and partition it into connected lane groups:
 
 - disjoint groups use `parallel` with one worktree per lane when worktrees pass;
 - intersecting groups use `sequential`, one lane at a time in the shared tree;
+- a set derived from prose `**Files:**` paragraphs joins this graph like any
+  other; a document that declares no paths at all forms its own group;
 - `execution = "sequential"` makes every group sequential;
 - `execution = "parallel"` requires every group to be parallel and fails loudly
   if a worktree or disjointness check fails;
