@@ -153,6 +153,20 @@ checkpoint_block() {
   section_block "$1" 'Checkpoint [Pp]rotocol'
 }
 
+brief_section() {
+  # A user's PRD is executed as written, so a section it never had is reported
+  # as absent instead of blocking the lane. Whatever is present is verbatim, and
+  # a legacy heading for the same content is transferred under its own name.
+  if [ -n "$(section_line "$2" "$1" || true)" ]; then
+    section_block "$1" "$2"
+  elif [ -n "${3:-}" ] && [ -n "$(section_line "$3" "$1" || true)" ]; then
+    printf 'The PRD declares this as `%s`, transferred verbatim:\n\n' "$3"
+    section_block "$1" "$3"
+  else
+    printf 'NOT DECLARED in this PRD. Follow the PRD as written; do not invent a %s section.\n' "$2"
+  fi
+}
+
 negative_data() {
   negative_block "$1" | awk -F '|' '
     function trim(value) {
@@ -175,8 +189,10 @@ clean_evidence_field() {
 
 command_from_field() {
   clean_field=$(clean_evidence_field "$1")
+  # The command may stand alone (plan time) or precede a result/exit triple
+  # (delivery evidence). Both forms yield the same comparable command string.
   printf '%s\n' "$clean_field" |
-    sed -n 's/^command:[[:space:]]*\([^;][^;]*\);[[:space:]]*result:.*/\1/p' |
+    sed -n 's/^command:[[:space:]]*\([^;][^;]*\).*/\1/p' |
     sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
 }
 
@@ -220,15 +236,21 @@ validate_negative_controls() {
     expected_result=$(result_from_field "$field")
     expected_exit=$(exit_from_field "$field")
     [ -n "$expected_command" ] || die "Negative Controls has no exact command: $gate"
-    [ -n "$expected_result" ] || die "Negative Controls has no result: $gate"
-    case "$expected_result" in
-      *'RED observed:'*) ;;
-      *) die "Negative Controls result lacks RED observed marker: $gate" ;;
-    esac
-    case "$expected_exit" in
-      ''|0|*[!0-9]*) die "Negative Controls result must declare a non-zero exit: $gate" ;;
-    esac
-    [ "$expected_exit" -gt 0 ] || die "Negative Controls result must declare a non-zero exit: $gate"
+    # The PRD declares the gate, its control, and the exact command. `RED
+    # observed` and the non-zero exit are what a worker observes; `gate` requires
+    # them in the report. A PRD that already carries them must still be honest.
+    if [ -n "$expected_result" ]; then
+      case "$expected_result" in
+        *'RED observed:'*) ;;
+        *) die "Negative Controls result lacks RED observed marker: $gate" ;;
+      esac
+    fi
+    if [ -n "$expected_exit" ]; then
+      case "$expected_exit" in
+        0|*[!0-9]*) die "Negative Controls result must declare a non-zero exit: $gate" ;;
+      esac
+      [ "$expected_exit" -gt 0 ] || die "Negative Controls result must declare a non-zero exit: $gate"
+    fi
   done <<EOF
 $negative_rows
 EOF
@@ -246,16 +268,25 @@ negative_row_count() {
 }
 
 validate_ledger() {
+  # A PRD is written before its code exists, so the plan-time contract requires
+  # a named non-test caller file, not a line number that cannot exist yet. The
+  # `file:line` form is enforced at delivery by `gate`, where it is checkable.
   prd="$1"
+  ledger_mode="${2:-plan}"
   rows=$(table_row_count "$prd")
   [ "$rows" -gt 0 ] || die "Integration Ledger has no data rows: $prd"
-  ledger_block "$prd" | awk -F '|' '
+  ledger_block "$prd" | awk -F '|' -v mode="$ledger_mode" '
     /^\|[[:space:]]*[0-9]+[[:space:]]*\|/ {
       for (i = 1; i <= NF; i++) {
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
         gsub(/`/, "", $i)
       }
-      if ($4 == "" || $4 ~ /TBD|pending|test\// || ($4 !~ /optional\/unbuilt/ && $4 !~ /:[0-9]+$/)) bad = 1
+      caller = $4
+      if (caller == "" || caller ~ /TBD|pending/) bad = 1
+      else if (caller ~ /optional\/unbuilt/) { }
+      else if (caller ~ /(^|[[:space:],(\/])(__tests__|tests?|spec|specs)\//) bad = 1
+      else if (caller !~ /[A-Za-z0-9_.\/-]+\.[A-Za-z0-9]+/) bad = 1
+      else if (mode == "delivered" && caller !~ /:[0-9]+/) bad = 1
       if ($7 == "" || $7 ~ /TBD|pending/) bad = 1
     }
     END { if (bad) exit 1 }
@@ -651,21 +682,27 @@ brief() {
   printf '%s\n' "$lane_id" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || die 'lane identity is malformed'
   case "$lane_mode" in parallel|sequential) ;; *) die "lane mode must be parallel or sequential: $lane_mode" ;; esac
   case "$delivery_mode" in pr|branch) ;; *) die "delivery mode must be pr or branch: $delivery_mode" ;; esac
-  contract_check "$prd" >/dev/null
+  require_file "$prd"
   runtime_metadata
   printf '%s\n' 'WORKER BRIEF: contract-preserving lane'
   printf 'Source PRD: %s\n' "$prd"
   printf 'Lane identity: %s\n' "$lane_id"
   printf '%s\n' 'Files (N) parsed:'
-  files_list "$prd" | sed 's/^/- /'
+  if brief_files=$(files_list "$prd" 2>/dev/null) && [ -n "$brief_files" ]; then
+    printf '%s\n' "$brief_files" | sed 's/^/- /'
+  else
+    printf '%s\n' '- UNPARSED: this PRD does not use machine-readable `Files (N)` lists.' \
+      '- Read the phase file lists in the PRD itself and follow them as written.' \
+      '- The lane runs sequentially because its file set cannot be proved disjoint.'
+  fi
   printf '%s\n' '' '## Integration Ledger (verbatim)'
-  ledger_block "$prd"
+  brief_section "$prd" 'Integration Ledger'
   printf '%s\n' '' '## Negative Controls (verbatim)'
-  negative_block "$prd"
+  brief_section "$prd" 'Negative Controls' 'Verification'
   printf '%s\n' '' '## Acceptance Criteria (verbatim)'
-  acceptance_block "$prd"
+  brief_section "$prd" 'Acceptance Criteria' 'Acceptance'
   printf '%s\n' '' '## Checkpoint Protocol (verbatim)'
-  checkpoint_block "$prd"
+  brief_section "$prd" 'Checkpoint [Pp]rotocol'
   printf '%s\n' '' '## Resolved Lane Metadata'
   printf 'Worker runtime: %s\n' "$worker_runtime"
   printf 'Reviewer runtime: %s\n' "$reviewer_runtime"
@@ -679,7 +716,7 @@ brief() {
 brief_check() {
   prd="$1"
   brief_file="$2"
-  contract_check "$prd" >/dev/null
+  require_file "$prd"
   require_file "$brief_file"
   runtime_metadata
   metadata_count=$(grep -Ec '^Lane identity:' "$brief_file" || true)
@@ -705,10 +742,10 @@ brief_check() {
 
   brief_temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/linchpin-brief-check.XXXXXX")
   trap 'rm -rf -- "$brief_temp_dir"' EXIT HUP INT TERM
-  ledger_block "$prd" > "$brief_temp_dir/ledger"
-  negative_block "$prd" > "$brief_temp_dir/negative"
-  acceptance_block "$prd" > "$brief_temp_dir/acceptance"
-  checkpoint_block "$prd" > "$brief_temp_dir/checkpoint"
+  brief_section "$prd" 'Integration Ledger' > "$brief_temp_dir/ledger"
+  brief_section "$prd" 'Negative Controls' 'Verification' > "$brief_temp_dir/negative"
+  brief_section "$prd" 'Acceptance Criteria' 'Acceptance' > "$brief_temp_dir/acceptance"
+  brief_section "$prd" 'Checkpoint [Pp]rotocol' > "$brief_temp_dir/checkpoint"
   for block_name in ledger negative acceptance checkpoint; do
     block_has_exact_sequence "$brief_temp_dir/$block_name" "$brief_file" || die "worker brief omitted or changed the verbatim $block_name block"
   done
@@ -816,13 +853,28 @@ route() {
       printf '%s\n' 'ROUTE-EXECUTE-NONE -> ask-once'
       return
     fi
+    # A PRD the user points at is executed as written. The contract is a creator
+    # standard for artifacts Linchpin authors, never an admission gate on the
+    # user's own document. The only execution blocker is a path that is not there.
+    missing=0
     while IFS= read -r prd; do
-      if ! sh "$script_dir/linchpin.sh" contract "$prd" >/dev/null 2>&1; then
-        printf '%s\n' 'ROUTE-EXECUTE-UPGRADE -> prd-creator-upgrade'
-        return
+      [ -n "$prd" ] || continue
+      if [ ! -f "$prd" ]; then
+        printf 'MISSING-PRD-PATH %s (resolved from %s)\n' "$prd" "$PWD"
+        missing=1
       fi
     done < "$prd_list"
+    if [ "$missing" -eq 1 ]; then
+      printf '%s\n' 'ROUTE-EXECUTE-NONE -> ask-once'
+      return
+    fi
     printf '%s\n' 'ROUTE-EXECUTE-CONFORMING -> prd-swarm-coordinator'
+    while IFS= read -r prd; do
+      [ -n "$prd" ] || continue
+      if ! sh "$script_dir/linchpin.sh" contract "$prd" >/dev/null 2>&1; then
+        printf 'ADVISORY %s does not carry prd_contract: v1; execute it as written. Do not rewrite it, and do not migrate it unless the user asks.\n' "$prd"
+      fi
+    done < "$prd_list"
     return
   fi
   printf '%s\n' 'ROUTE-AMBIGUOUS -> ask-once'
@@ -860,9 +912,20 @@ mode_selection() {
     execution="$requested_execution"
   fi
   index=1
+  unparsed_any=0
   while IFS= read -r prd; do
-    contract_check "$prd" >/dev/null
-    files_list "$prd" | sort -u > "$temp_dir/files-$index"
+    require_file "$prd"
+    if files_list "$prd" 2>/dev/null | sort -u > "$temp_dir/files-$index" &&
+       [ -s "$temp_dir/files-$index" ]; then
+      printf '0\n' > "$temp_dir/unparsed-$index"
+    else
+      # An unparseable file list is never treated as disjoint. The PRD still
+      # executes; it just cannot claim an isolated lane.
+      : > "$temp_dir/files-$index"
+      printf '1\n' > "$temp_dir/unparsed-$index"
+      unparsed_any=1
+      printf 'ANNOUNCE: %s has no machine-readable Files (N) list; its lane runs sequentially.\n' "$prd"
+    fi
     printf '%s\n' "$prd" > "$temp_dir/label-$index"
     index=$((index + 1))
   done < "$temp_dir/prds"
@@ -872,7 +935,8 @@ mode_selection() {
   while [ "$i" -le "$count" ]; do
     j=$((i + 1))
     while [ "$j" -le "$count" ]; do
-      if comm -12 "$temp_dir/files-$i" "$temp_dir/files-$j" | grep -q .; then
+      if [ "$(cat "$temp_dir/unparsed-$i")" = 1 ] || [ "$(cat "$temp_dir/unparsed-$j")" = 1 ] ||
+         comm -12 "$temp_dir/files-$i" "$temp_dir/files-$j" | grep -q .; then
         printf '%s %s\n' "$i" "$j" >> "$temp_dir/edges"
       fi
       j=$((j + 1))
@@ -1015,6 +1079,8 @@ gate_evidence() {
   report="$2"
   contract_check "$prd" >/dev/null
   require_file "$report"
+  # Delivery is the point where the planned caller must have become a real one.
+  validate_ledger "$prd" delivered
   expected_rows=$(negative_data "$prd")
   actual_rows=$(awk -F '|' '
     function trim(value) {

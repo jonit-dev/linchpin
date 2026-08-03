@@ -47,8 +47,14 @@ a PRD, but creator output always stops at an explicit confirmation point. Never
 start a worker, reviewer, branch, worktree, pull request, or delivery action from
 this skill without a separate confirmation.
 
-If intake sends a non-conforming existing PRD here, use **upgrade mode**. It is a
-gap-filling pass over a machine-generated copy, never a rewrite:
+An existing PRD the user asks to *run* never comes here. Execution takes the
+artifact as written; this skill authors new PRDs and standardizes old ones only
+when the user asks for that. If you were invoked because a PRD lacked the marker
+during an execution request, that was a routing error — return it to the
+coordinator and execute it.
+
+When the user does ask to standardize an existing PRD, use **upgrade mode**. It
+is a gap-filling pass over a machine-generated copy, never a rewrite:
 
 1. Run `scripts/linchpin.sh migrate <prd>` first. It preserves the original
    untouched and writes `<prd>.v1.md` with the headings renamed, the prose file

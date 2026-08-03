@@ -19,8 +19,21 @@ case "$start_route" in
   *ROUTE-WRITE-PRD*) fail 'an execution intent was routed to PRD authoring' ;;
 esac
 
+# A PRD the user points at executes as written. A missing marker is advisory,
+# never an admission gate: routing it to authoring is how a user's document got
+# rewritten instead of run.
 nonconforming="$tmp_dir/nonconforming.md"
 sed '/^prd_contract: v1$/d' "$fixture" > "$nonconforming"
-assert_contains "$(sh "$repo_root/scripts/linchpin.sh" route 'run these' 5 "$nonconforming" "$fixture")" 'ROUTE-EXECUTE-UPGRADE -> prd-creator-upgrade'
+nonconforming_route=$(sh "$repo_root/scripts/linchpin.sh" route 'run these' 5 "$nonconforming" "$fixture")
+assert_contains "$nonconforming_route" 'ROUTE-EXECUTE-CONFORMING -> prd-swarm-coordinator'
+assert_contains "$nonconforming_route" "ADVISORY $nonconforming"
+case "$nonconforming_route" in
+  *prd-creator*) fail 'a user-supplied PRD was routed to authoring instead of execution' ;;
+esac
+
+# The one real execution blocker is a path that is not there.
+missing_route=$(sh "$repo_root/scripts/linchpin.sh" route 'start these' "$tmp_dir/not-a-file.md")
+assert_contains "$missing_route" 'ROUTE-EXECUTE-NONE -> ask-once'
+assert_contains "$missing_route" 'MISSING-PRD-PATH'
 assert_contains "$(sh "$repo_root/scripts/linchpin.sh" route 'fix the typo' 5 "$fixture" "$fixture")" 'ROUTE-AMBIGUOUS -> ask-once'
 pass 'intent wins over PRD state and all routing-table branches are exercised'

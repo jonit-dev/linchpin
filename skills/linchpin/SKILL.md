@@ -18,9 +18,9 @@ machine-checkable preflight, contract, and mode decisions.
 | `ROUTE-WRITE-PRD` | "write/draft/author a PRD for X" | none | `prd-creator` |
 | `ROUTE-BUILD-SMALL` | "build/implement X" | complexity score <= 2 | refuse pipeline; offer direct edit |
 | `ROUTE-BUILD-LARGE` | "build/implement X" | complexity score >= 3 | `prd-creator`, then stop for confirmation |
-| `ROUTE-EXECUTE-CONFORMING` | "run/execute/start/begin/launch/resume" | one or more conforming PRDs | `prd-swarm-coordinator` |
-| `ROUTE-EXECUTE-UPGRADE` | any execute intent | at least one PRD is non-conforming | migrate, then `prd-creator` upgrade mode, then re-route |
-| `ROUTE-EXECUTE-NONE` | "run/execute/start" | no PRD supplied or found | ask once for the PRD path |
+| `ROUTE-EXECUTE-CONFORMING` | "run/execute/start/begin/launch/resume" | every supplied PRD path exists | `prd-swarm-coordinator` |
+| `ROUTE-EXECUTE-UPGRADE` | user explicitly asks to standardize a PRD | any | `migrate`, then `prd-creator` upgrade mode |
+| `ROUTE-EXECUTE-NONE` | "run/execute/start" | no PRD supplied, or a supplied path is not on disk | ask once for the PRD path |
 | `ROUTE-AMBIGUOUS` | intent cannot be classified | any | ask one short question; never guess |
 
 ## Dispatch procedure
@@ -33,11 +33,15 @@ machine-checkable preflight, contract, and mode decisions.
 2. Compute the complexity score for build/implement requests. Route scores 1–2
    to a direct edit refusal; route scores 3+ to creator and stop for explicit
    confirmation.
-3. For execute requests, validate every supplied PRD with
-   `scripts/linchpin.sh contract <prd>`. For a non-conforming artifact run
-   `scripts/linchpin.sh migrate <prd>`, which preserves the original and writes a
-   `.v1.md` beside it, then hand any reported gaps to creator upgrade mode.
-   Return to this table only after a durable `prd_contract: v1` artifact exists.
+3. For execute requests, **run the PRDs the user pointed at, as written.** The
+   `prd_contract: v1` standard applies to PRDs Linchpin authors, not to the
+   user's own document. A missing marker, a legacy heading, a prose file list, or
+   an absent ledger is an `ADVISORY` line — not a blocker, and not a reason to
+   rewrite, migrate, or re-draft anything. Hand every supplied path to the
+   coordinator. Only run `scripts/linchpin.sh migrate` when the user explicitly
+   asks to standardize an artifact. The one real blocker is a path that is not on
+   disk: report it and ask once. Never answer an execution request with a
+   standards complaint.
 4. For conforming inputs, invoke `prd-swarm-coordinator` with all PRDs. One
    input is still one coordinator lane; there is no separate single path.
 5. Announce any sequential worktree or delivery fallback before it takes effect.

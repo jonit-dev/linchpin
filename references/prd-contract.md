@@ -4,6 +4,16 @@ This file is the canonical artifact contract shared by the creator, the intake
 router, and the swarm coordinator. It defines the parts of a PRD that can be
 checked without asking a worker to reinterpret the author's intent.
 
+**Scope.** This contract is the standard for PRDs *Linchpin authors*. It is not
+an admission gate on a document the user wrote. A PRD the user points at is
+executed as written, whatever shape it is in — see `references/intake.md`.
+Nothing below is a reason to refuse, rewrite, or migrate a user's artifact.
+
+The ledger and negative-control rules below are checked at two different times: a
+plan declares its intended caller and the exact command it will run, and delivery
+proves the caller became a real `file:line` and the command was observed red.
+Demanding delivery evidence from a plan makes a correct PRD unpassable.
+
 ## Conformance marker
 
 A conforming PRD begins with this exact front matter. The marker is emitted only

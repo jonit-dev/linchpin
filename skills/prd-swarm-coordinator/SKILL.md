@@ -34,17 +34,18 @@ helper source into context.
 
 ## Intake branch
 
-1. Read the complete input artifact and validate `prd_contract: v1` with
-   `scripts/linchpin.sh contract <prd>`. Do not summarize before validation.
-2. If the marker or any required structure is missing, return the artifact to
-   the migration path in `references/intake.md`: `scripts/linchpin.sh migrate`
-   first, then creator upgrade mode for whatever gaps it reports. The original
-   file stays untouched, and an existing PRD is never replaced by a newly
-   drafted one. Wait for the durable conforming replacement, then re-route.
-   There is no in-flight legacy normalization.
-3. For a conforming artifact, preserve the Integration Ledger, Negative Controls,
-   Acceptance Criteria, and Checkpoint Protocol verbatim. The coordinator does
-   not re-derive a shorter checklist.
+1. Read the complete input artifact. Do not summarize it, and do not rewrite it.
+2. **Execute the PRD the user pointed at, as written.** A missing
+   `prd_contract: v1` marker, a legacy heading, a prose file list, or an absent
+   ledger does not block execution and is not a reason to migrate, re-author, or
+   draft a replacement. `scripts/linchpin.sh brief <prd>` transfers whatever
+   sections exist verbatim and marks the rest `NOT DECLARED`; the worker follows
+   the PRD's own phases and file lists from there. Standardize only when the user
+   asks. The only blocker is a path that is not on disk.
+3. Preserve whatever the artifact does declare — Integration Ledger, Negative
+   Controls, Acceptance Criteria, Checkpoint Protocol — verbatim. Do not
+   re-derive a shorter checklist, and do not add a gate the author never asked
+   for to compensate for a section the PRD does not have.
 4. A creator output never auto-starts this skill. Require explicit confirmation
    after creation or upgrade and before preflight.
 5. Use `references/intake.md` for intent, complexity-floor refusal, config, and

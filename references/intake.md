@@ -14,9 +14,9 @@ by the verification tests.
 | `ROUTE-WRITE-PRD` | "write/draft/author a PRD for X" | none | `prd-creator` |
 | `ROUTE-BUILD-SMALL` | "build/implement X" | complexity score <= 2 | refuse pipeline; offer direct edit |
 | `ROUTE-BUILD-LARGE` | "build/implement X" | complexity score >= 3 | `prd-creator`, then stop for confirmation |
-| `ROUTE-EXECUTE-CONFORMING` | "run/execute/start/begin/launch/resume" | one or more conforming PRDs | `prd-swarm-coordinator` |
-| `ROUTE-EXECUTE-UPGRADE` | any execute intent | at least one PRD is non-conforming | migrate, then `prd-creator` upgrade mode, then re-route |
-| `ROUTE-EXECUTE-NONE` | "run/execute/start" | no PRD supplied or found | ask once for the PRD path |
+| `ROUTE-EXECUTE-CONFORMING` | "run/execute/start/begin/launch/resume" | every supplied PRD path exists | `prd-swarm-coordinator` |
+| `ROUTE-EXECUTE-UPGRADE` | user explicitly asks to standardize a PRD | any | `migrate`, then `prd-creator` upgrade mode |
+| `ROUTE-EXECUTE-NONE` | "run/execute/start" | no PRD supplied, or a supplied path is not on disk | ask once for the PRD path |
 | `ROUTE-AMBIGUOUS` | intent cannot be classified | any | ask one short question; never guess |
 
 Intent wins over repository state: three conforming files on disk do not change
@@ -38,10 +38,40 @@ a PRD for a trivial request. Scores 3 through 6 use the creator's low/medium
 planning path. Scores 7 and above use its high path. A configured `prd_floor`
 may raise the floor, but it may not lower the built-in refusal for scores <= 2.
 
-## Non-conforming PRDs and confirmation
+## Execute the document the user pointed at
 
-An execute request with a missing or invalid `prd_contract: v1` marker enters the
-legacy migration path, in this order:
+**A PRD the user names is executed as written.** The `prd_contract: v1` standard
+governs artifacts *Linchpin authors*; it is never an admission gate on a document
+the user already wrote. A missing marker, a legacy heading, a prose file list, an
+absent ledger or negative-control table: none of these block execution, and none
+of them license a rewrite.
+
+When a supplied PRD is non-conforming:
+
+- run it. `scripts/linchpin.sh route` returns `ROUTE-EXECUTE-CONFORMING` plus an
+  `ADVISORY` line naming the artifact;
+- `scripts/linchpin.sh brief` transfers whatever sections exist verbatim and
+  marks the rest `NOT DECLARED`. The worker follows the PRD's own phases;
+- a PRD with no machine-readable `Files (N)` list is never treated as disjoint.
+  Its lane runs sequentially and the reason is announced;
+- gates, acceptance, and checkpoints come from the PRD. Do not invent a gate the
+  author did not ask for, and do not refuse delivery for a section the author
+  never wrote.
+
+Say nothing about conformance unless the user asks. Never answer an execution
+request with a standards complaint.
+
+The only execution blocker is a path that is not on disk: report
+`MISSING-PRD-PATH`, ask once, and stop.
+
+## Standardizing a PRD (only when the user asks)
+
+Migration runs when the user explicitly asks to standardize an artifact, or when
+a change requires a *new* PRD — that new one goes through `prd-creator` and does
+carry the marker. Never start this path on your own initiative in the middle of
+an execution request.
+
+The migration path, in this order:
 
 1. Run `scripts/linchpin.sh migrate <prd>` on every non-conforming path. It
    copies nothing over the original, writes `<prd>.v1.md` beside it, renames the
