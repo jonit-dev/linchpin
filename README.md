@@ -1,70 +1,82 @@
 # linchpin
 
-`linchpin` is a Codex-only v1 plugin that runs one or many conforming PRDs
-through one contract-preserving swarm path. The current session is the manager;
-workers run in isolated lanes where possible, and each lane receives one
-read-only review before delivery.
+A Codex plugin that takes your PRDs and builds them.
 
-## Install from GitHub
+You point it at one PRD or ten. It splits the work into lanes, runs each lane in
+its own git worktree, has a separate read-only reviewer check the result, and
+reports what shipped and what did not. Your Codex session stays in charge as the
+manager; the implementation happens in `codex exec` subprocesses.
 
-Register the GitHub repository as a marketplace, then install the plugin:
+Codex only. Claude Code is not supported.
+
+## Install
+
+`codex plugin add` installs from a marketplace, so you register this repo as a
+marketplace first:
 
 ```sh
-codex plugin marketplace add https://github.com/jonit-dev/linchpin.git --ref main
+codex plugin marketplace add jonit-dev/linchpin --ref main
 codex plugin add linchpin@linchpin
 ```
 
-Start a fresh Codex task after installation. Invoke `$linchpin` for intake, or
-invoke `$prd-creator` and `$prd-swarm-coordinator` directly. The router is a
-convenience entry point, not a prerequisite for either direct skill.
+Then start a fresh Codex session. Type `$linchpin` and describe what you want,
+or call `$prd-creator` and `$prd-swarm-coordinator` directly if you already know
+which one you need. `$linchpin` just routes; it is not a prerequisite.
 
-For a local checkout, replace the GitHub URL with the checkout path after the
-repository's `.agents/plugins/marketplace.json` is present.
+To install from a local checkout, pass the checkout path instead of the repo
+name. The path needs `.agents/plugins/marketplace.json` in it, which this repo
+has.
 
-## Use
+## Using it
 
-1. Ask for a PRD, an implementation, or execution of one or more PRDs.
-2. Intake reads `references/intake.md`, applies the complexity floor, and checks
-   the local capability preflight.
-3. Creator output stops for explicit confirmation. Non-conforming PRDs go
-   through durable migration and creator upgrade mode; the original file is
-   never edited or replaced.
-4. The coordinator preserves the Integration Ledger, acceptance criteria,
-   negative controls, and checkpoint protocol in every worker brief.
+Ask for a PRD, ask for an implementation, or ask it to run PRDs you already
+wrote:
 
-"start", "begin", "launch", and "resume" are execution verbs. Naming PRDs you
-already wrote never triggers PRD authoring.
+```
+$linchpin run docs/PRDs/PRD-007.md docs/PRDs/PRD-008.md
+```
 
-Point Linchpin at whatever you already have. A PRD that predates the contract
-runs as written: its file set is read from the prose paragraphs that name it, a
-section it never declared is reported absent instead of invented, and delivery
-is gated on the controls it does declare. One missing path asks about that path;
-the rest of the batch still runs. Run `sh scripts/linchpin.sh help` for the
-subcommands.
+"start", "begin", "launch" and "resume" mean execute. Naming files you already
+wrote never makes it write a new PRD over them.
 
-## Bring an existing PRD up to the contract
+When you ask for something new, it scores the request first. Trivial changes get
+refused and offered as a direct edit instead of a five-lane pipeline. Anything
+bigger goes to the creator, which stops and waits for you to confirm the draft
+before a single branch is created.
+
+Old PRDs run as written. If a PRD predates the file-list format, linchpin reads
+the paths out of your prose. If it never declared a section, that section is
+reported missing rather than invented. Delivery is gated on the checks your PRD
+actually asked for, not on checks linchpin wishes it had. One bad path asks about
+that path and runs the rest of the batch.
+
+`sh scripts/linchpin.sh help` lists the subcommands the skills use.
+
+## Upgrading an old PRD to the contract
+
+Only needed if you want the standard format. Execution does not require it.
 
 ```sh
 sh scripts/linchpin.sh migrate docs/PRDs/PRD-007-example.md
 ```
 
-Migration reads the original and never writes to it. It produces
-`PRD-007-example.v1.md` with the required headings renamed, prose `**Files:**`
-paragraphs rewritten as parseable `Files (N)` lists, and any missing section
-scaffolded, then reports one of:
+This reads the original and never writes to it. Output goes to
+`PRD-007-example.v1.md` with headings renamed, prose `**Files:**` paragraphs
+converted to parseable `Files (N)` lists, and missing sections scaffolded. You
+get one of two results:
 
-- `MIGRATED` — the artifact carries `prd_contract: v1` and is ready to route;
-- `MIGRATION-INCOMPLETE` — the marker was withheld and every remaining gap is
-  listed, including each `MIGRATION-TODO` line. Gaps that need real evidence
-  (a gate's exact command, a caller's `file:line`) belong to an author, not to
-  the parser.
+- `MIGRATED` — the file carries `prd_contract: v1` and is ready to run.
+- `MIGRATION-INCOMPLETE` — every remaining gap is listed, including each
+  `MIGRATION-TODO` line. Gaps that need real evidence, like a gate's exact
+  command or a caller's `file:line`, are yours to fill in. A parser cannot guess
+  them.
 
-`sh scripts/linchpin.sh contract <prd>` reports every problem in one run.
+`sh scripts/linchpin.sh contract <prd>` reports every problem in one pass.
 
-## Customizing a run
+## Configuration
 
-Everything tunable lives in one optional file, `.linchpin.toml`, in the target
-repository. Omit it for zero-config defaults:
+One optional file, `.linchpin.toml`, in the repo you are working on. Skip it and
+you get the defaults below:
 
 ```toml
 execution = "auto"       # auto | parallel | sequential
@@ -79,66 +91,63 @@ reviewer = ""            # "" = shipped pin; luna | sol | terra
 reviewer_effort = ""     # "" = shipped pin; low | medium | high | max
 ```
 
-`sh scripts/linchpin.sh config .` prints the resolved values, including which
-defaults are in force. An invalid key or value fails there, before a run starts,
-rather than once per lane in the middle of one.
+`sh scripts/linchpin.sh config .` prints what actually resolved, including which
+defaults are in play. A bad key or value fails there, before the run starts,
+instead of once per lane in the middle of one.
 
-Models and effort are configurable per repository so that changing a role does
-not mean editing `references/runtime.md`, which ships inside the plugin and is
-overwritten on upgrade.
+Models and effort are per-repo so you never have to edit
+`references/runtime.md`, which ships inside the plugin and gets overwritten when
+you upgrade.
 
-Models are chosen by **alias**, never by raw slug. The alias is the stable name;
-a slug typed into a config file is a pin that goes stale the moment the class
-moves, so `worker = "gpt-5.6-luna"` is rejected as firmly as a typo. The alias
-table in `references/runtime.md` is the only place a slug appears.
+Pick models by alias, never by raw slug. `worker = "gpt-5.6-luna"` is rejected
+the same as a typo would be, because a slug written into a config file goes stale
+the moment the model class moves. The alias table in `references/runtime.md` is
+the only place a slug appears.
 
-Preflight verifies the worker *and* reviewer models the run will actually use,
-against your local model cache, before any branch is created — a reviewer model
-missing from the cache otherwise fails at the first review, after the run has
-already spent its worker time. Nothing in this file weakens review, gate
-evidence, or the inherited controls; those follow the PRD, not the config.
+Preflight checks both the worker and the reviewer model against your local model
+cache before creating any branch. Otherwise a missing reviewer model would blow
+up at the first review, after the run had already spent all its worker time.
+
+None of these settings weaken review or gate evidence. Those come from the PRD.
 
 ## What a run leaves behind
 
-A run writes its ledger, briefs, and lane logs to `.linchpin/` in the target
-repository, and its worktrees to `.worktrees/`. Neither belongs to you, so
-neither should land in your `git status`:
+Runs write ledgers, briefs and lane logs to `.linchpin/`, and worktrees to
+`.worktrees/`, both in the target repo. Neither should show up in your
+`git status`:
 
 ```sh
 sh scripts/linchpin.sh workspace .
 ```
 
 The coordinator runs this before its first write. It creates `.linchpin/` and
-adds both paths to `.git/info/exclude` unless the repository already ignores
-them. `.git/info/exclude` rather than `.gitignore` is deliberate: ignoring
-Linchpin's own scratch output must not leave a modified tracked file behind, or
-sweep into a lane commit. If you would rather commit the ignore rule for your
-team, add `.linchpin/` to `.gitignore` yourself.
+adds both paths to `.git/info/exclude` unless the repo already ignores them.
+`.git/info/exclude` rather than `.gitignore` is deliberate: ignoring linchpin's
+scratch output should not leave a modified tracked file behind or sweep into a
+lane commit. If you want the ignore rule committed for your team, add
+`.linchpin/` to `.gitignore` yourself.
 
-`.linchpin/` is the run record — keep it to resume or audit a run, delete it
-when you are done. Worktrees and merged lane branches are removed at the end of
-the run. A lane that ended `PARTIAL` or `BLOCKED` keeps its worktree and branch
-on purpose; the final report names each one and the command that resumes it.
+Keep `.linchpin/` to resume or audit a run, delete it when you are done.
+Worktrees and merged lane branches are cleaned up at the end of the run. A lane
+that finished `PARTIAL` or `BLOCKED` keeps its worktree and branch on purpose;
+the final report names each one and the command that resumes it.
 
-## Runtime boundary
+## Runtime
 
-The runtime pins and delegation rule live only in `references/runtime.md`.
-Luna is launched only through a `codex exec` subprocess; it is never a native
-subagent. Sol performs the manager and read-only reviewer roles at the pinned
-effort. Repair changes the specification or handoff, never the model tier.
+Model pins and delegation rules live only in `references/runtime.md`. Luna runs
+only as a `codex exec` subprocess, never as a native subagent. Sol handles the
+manager and read-only reviewer roles. When a lane needs repair, linchpin changes
+the specification or the handoff, not the model tier.
 
-## Install-swap status
+## Install-swap
 
-No files under the user's Codex, Claude, or Hermes directories are changed by
-this repository. The high-risk incumbent swap remains a manual confirmation
-gate. Read [docs/migration-swap.md](docs/migration-swap.md) and run the
-read-only `scripts/migration-swap.sh --dry-run` before a user performs any
-backup, equality check, or removal. The generic non-PRD swarm remains untouched.
+This repo does not touch anything under your Codex, Claude or Hermes
+directories. Swapping out an incumbent install is a manual step you confirm
+yourself. Read [docs/migration-swap.md](docs/migration-swap.md) and run the
+read-only `scripts/migration-swap.sh --dry-run` before any backup, equality
+check or removal.
 
-The retired single-PRD executor behavior is represented by the coordinator's
-one-to-many path; there is no shipped duplicate executor skill.
-
-## v1 boundary
+## Not in v1
 
 Claude Code support, patch delivery, cross-lane dependency ordering, and the
-optional goal loop are not shipped.
+optional goal loop.
