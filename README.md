@@ -73,7 +73,9 @@ base = "auto"            # auto = repository default branch
 review = true
 max_lanes = 4
 prd_floor = 3
+worker = ""              # "" = shipped pin; luna | sol | terra
 worker_effort = ""       # "" = shipped pin; low | medium | high | max
+reviewer = ""            # "" = shipped pin; luna | sol | terra
 reviewer_effort = ""     # "" = shipped pin; low | medium | high | max
 ```
 
@@ -81,12 +83,20 @@ reviewer_effort = ""     # "" = shipped pin; low | medium | high | max
 defaults are in force. An invalid key or value fails there, before a run starts,
 rather than once per lane in the middle of one.
 
-Effort is configurable per repository so that raising a role does not mean
-editing `references/runtime.md`, which ships inside the plugin and is
-overwritten on upgrade. The model is not configurable: preflight verifies the
-worker model's declared capability, so substituting one produces a run that was
-never checked. Nothing in the file weakens review, gate evidence, or the
-inherited controls — those follow the PRD, not the config.
+Models and effort are configurable per repository so that changing a role does
+not mean editing `references/runtime.md`, which ships inside the plugin and is
+overwritten on upgrade.
+
+Models are chosen by **alias**, never by raw slug. The alias is the stable name;
+a slug typed into a config file is a pin that goes stale the moment the class
+moves, so `worker = "gpt-5.6-luna"` is rejected as firmly as a typo. The alias
+table in `references/runtime.md` is the only place a slug appears.
+
+Preflight verifies the worker *and* reviewer models the run will actually use,
+against your local model cache, before any branch is created — a reviewer model
+missing from the cache otherwise fails at the first review, after the run has
+already spent its worker time. Nothing in this file weakens review, gate
+evidence, or the inherited controls; those follow the PRD, not the config.
 
 ## What a run leaves behind
 

@@ -16,6 +16,27 @@ Writing a PRD is the decision that every lane inherits, so it runs at the
 Author row's higher effort rather than the manager's. Upgrade mode and any
 gap-filling pass use the same row.
 
+## Model aliases
+
+A repository selects a model by alias, never by raw slug. The alias is the
+stable name; the slug moves when the class does, and a slug typed into a config
+file is a pin that silently goes stale.
+
+| Alias | Model | Native spawning |
+|---|---|---|
+| `luna` | `gpt-5.6-luna` | forbidden — reports `multi_agent_version: "v1"` |
+| `sol` | `gpt-5.6-sol` | permitted by the model; linchpin still uses `codex exec` |
+| `terra` | `gpt-5.6-terra` | permitted by the model; linchpin still uses `codex exec` |
+
+This table is the only place a slug appears. `worker` and `reviewer` in
+`.linchpin.toml` accept these aliases, and an alias with no row here is a
+configuration failure rather than a model request that reaches the API.
+
+Every role runs through `codex exec` regardless of alias, so the native-spawn
+hazard in the Luna row never arises from a supported path. The row is recorded
+because the constraint belongs to the model, not to the way linchpin happens to
+launch it today.
+
 ## Delegation rules
 
 1. Luna runs only as a `codex exec` subprocess. It is never launched through a
@@ -23,12 +44,13 @@ gap-filling pass use the same row.
    Luna because the model reports `multi_agent_version: "v1"` while native
    spawning speaks v2.
 2. The manager reads this table when launching a worker; it must not substitute
-   a different model, effort, or tier. Terra and any third tier are out of scope.
-   The one legitimate change is a repo-local `worker_effort` or
-   `reviewer_effort` in `.linchpin.toml`, declared by the user before the run
-   starts and applied uniformly to every lane. That is configuration. What this
-   rule forbids is the manager moving a tier *during* a run — especially to get
-   past a gate that failed. No config key substitutes a model.
+   a different model, effort, or tier of its own accord. The legitimate change
+   is a repo-local `worker`, `reviewer`, `worker_effort`, or `reviewer_effort`
+   in `.linchpin.toml`, declared by the user before the run starts and applied
+   uniformly to every lane. That is configuration, and preflight verifies the
+   resolved worker model before any branch is created. What this rule forbids is
+   the manager moving a model or tier *during* a run — above all to get past a
+   gate that failed. A run reports the models it actually used.
 3. Sol review is launched with `codex exec --sandbox read-only`, so the reviewer
    cannot edit, commit, push, merge, or repair the lane.
 4. Worker, repair, integration, and conflict processes all use the Worker row.

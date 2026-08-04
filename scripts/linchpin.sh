@@ -19,7 +19,12 @@ require_file() {
 runtime_value() {
   runtime_role="$1"
   runtime_column="$2"
+  # Scoped to its own table. runtime.md holds several tables with the same
+  # column shape, so an unscoped scan makes every table a lookup source for
+  # every other one.
   awk -F '|' -v target="$runtime_role" -v column="$runtime_column" '
+    /^## / { in_table = ($0 ~ /^## Role pins/); next }
+    !in_table { next }
     {
       role = $2
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", role)
@@ -29,6 +34,29 @@ runtime_value() {
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
         print value
         exit
+      }
+    }
+  ' "$runtime_reference"
+}
+
+alias_model() {
+  # Resolves an alias from the Model aliases table in runtime.md. Empty output
+  # means the alias has no row, which is a configuration failure, not a model
+  # request to pass along. Scoped to that one table: the Role pins table has the
+  # same column shape, so an unscoped scan would let `worker = "Manager"` resolve
+  # to a real model that the alias allowlist was supposed to reject.
+  awk -F '|' -v target="$1" '
+    /^## / { in_table = ($0 ~ /^## Model aliases/); next }
+    !in_table { next }
+    {
+      name = $2
+      gsub(/`/, "", name)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+      if (name == target) {
+        value = $3
+        gsub(/`/, "", value)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        if (value ~ /^gpt-/) { print value; exit }
       }
     }
   ' "$runtime_reference"
@@ -49,6 +77,14 @@ runtime_metadata() {
   # substituting one is how a run silently stops being the run that was checked.
   [ -z "${cfg_worker_effort:-}" ] || worker_effort="$cfg_worker_effort"
   [ -z "${cfg_reviewer_effort:-}" ] || reviewer_effort="$cfg_reviewer_effort"
+  if [ -n "${cfg_worker_model:-}" ]; then
+    worker_model=$(alias_model "$cfg_worker_model")
+    [ -n "$worker_model" ] || die "unknown worker alias: $cfg_worker_model (see the Model aliases table in references/runtime.md)"
+  fi
+  if [ -n "${cfg_reviewer_model:-}" ]; then
+    reviewer_model=$(alias_model "$cfg_reviewer_model")
+    [ -n "$reviewer_model" ] || die "unknown reviewer alias: $cfg_reviewer_model (see the Model aliases table in references/runtime.md)"
+  fi
   [ -n "$worker_model" ] || die 'runtime.md has no Worker model pin'
   [ -n "$worker_effort" ] || die 'runtime.md has no Worker effort pin'
   [ "$worker_mechanism" = 'codex exec' ] || die 'runtime.md Worker mechanism is not codex exec'
@@ -620,6 +656,8 @@ load_config() {
       review) review="$config_value" ;;
       max_lanes) max_lanes="$config_value" ;;
       prd_floor) prd_floor="$config_value" ;;
+      worker) cfg_worker_model="$config_value" ;;
+      reviewer) cfg_reviewer_model="$config_value" ;;
       worker_effort) cfg_worker_effort="$config_value" ;;
       reviewer_effort) cfg_reviewer_effort="$config_value" ;;
     esac
@@ -951,6 +989,8 @@ config_values() {
   # Empty means "use the pin in runtime.md" — the zero-config default.
   worker_effort_override=
   reviewer_effort_override=
+  worker_override=
+  reviewer_override=
   if [ -f "$config_file" ]; then
     while IFS= read -r raw || [ -n "$raw" ]; do
       line=$(printf '%s' "$raw" | sed 's/[[:space:]]*#.*$//')
@@ -967,6 +1007,8 @@ config_values() {
         review) review="$value" ;;
         max_lanes) max_lanes="$value" ;;
         prd_floor) prd_floor="$value" ;;
+        worker) worker_override="$value" ;;
+        reviewer) reviewer_override="$value" ;;
         worker_effort) worker_effort_override="$value" ;;
         reviewer_effort) reviewer_effort_override="$value" ;;
         *) die "unknown .linchpin.toml key: $key" ;;
@@ -991,8 +1033,18 @@ config_values() {
     ''|low|medium|high|max) ;;
     *) die "reviewer_effort must be low, medium, high, or max: $reviewer_effort_override" ;;
   esac
-  printf 'execution=%s\ndelivery=%s\nbase=%s\nreview=%s\nmax_lanes=%s\nprd_floor=%s\nworker_effort=%s\nreviewer_effort=%s\n' \
+  # Validate the alias against the table that actually resolves it, so adding a
+  # model to runtime.md is one edit rather than two that can disagree.
+  for role_pair in "worker=$worker_override" "reviewer=$reviewer_override"; do
+    role_name=${role_pair%%=*}
+    role_alias=${role_pair#*=}
+    [ -n "$role_alias" ] || continue
+    [ -n "$(alias_model "$role_alias")" ] ||
+      die "$role_name must be an alias in the Model aliases table in references/runtime.md: $role_alias"
+  done
+  printf 'execution=%s\ndelivery=%s\nbase=%s\nreview=%s\nmax_lanes=%s\nprd_floor=%s\nworker=%s\nreviewer=%s\nworker_effort=%s\nreviewer_effort=%s\n' \
     "$execution" "$delivery" "$base" "$review" "$max_lanes" "$prd_floor" \
+    "$worker_override" "$reviewer_override" \
     "$worker_effort_override" "$reviewer_effort_override"
 }
 
@@ -1387,6 +1439,14 @@ EOF
 }
 
 preflight_model() {
+  # The configured worker may not be the shipped pin, so resolve config before
+  # deciding which model to verify. Verifying the default while the run uses
+  # another model is a preflight that proves nothing. A malformed config must
+  # fail here rather than be swallowed: preflight exists to refuse before any
+  # branch is created, and a PASS naming a model the config never asked for is
+  # worse than no preflight at all. An ABSENT config is the zero-config default
+  # and is not an error.
+  load_config "${LINCHPIN_CONFIG_DIR:-$PWD}"
   runtime_metadata
   cache_path="${1:-${LINCHPIN_MODELS_CACHE:-}}"
   if [ -z "$cache_path" ]; then
@@ -1395,11 +1455,28 @@ preflight_model() {
   fi
   require_file "$cache_path"
   command -v jq >/dev/null 2>&1 || die 'jq is required for model preflight'
-  jq -e --arg model "$worker_model" '
-    .. | objects | select(.slug? == $model) |
-    (.multi_agent_version? == "v1")
-  ' "$cache_path" >/dev/null || die "worker model or v1 capability missing from $cache_path"
-  printf 'PREFLIGHT-PASS worker=%s mechanism=%s reviewer=%s cache=%s\n' "$worker_model" "$worker_mechanism" "$reviewer_mechanism" "$cache_path"
+  # Every role that will actually run gets checked, not just the worker. A
+  # reviewer model missing from the cache fails at the first lane's review,
+  # after the run has already spent its worker time.
+  for preflight_model_slug in "$worker_model" "$reviewer_model"; do
+    jq -e --arg model "$preflight_model_slug" '
+      [.. | objects | select(.slug? == $model)] | length > 0
+    ' "$cache_path" >/dev/null || die "model missing from $cache_path: $preflight_model_slug"
+    # A model that declares no multi-agent capability is not one this plugin
+    # knows how to drive. Absent is a refusal; the specific version is not.
+    jq -e --arg model "$preflight_model_slug" '
+      [.. | objects | select(.slug? == $model) | select(.multi_agent_version? != null)] | length > 0
+    ' "$cache_path" >/dev/null || die "model declares no multi_agent_version in $cache_path: $preflight_model_slug"
+  done
+  # Luna speaks v1 while native spawning speaks v2, so it must never be started
+  # through a native subagent. Linchpin always uses `codex exec`, and
+  # `scripts/verify.sh` greps the skills for `agent_type`/`fork_turns` to keep
+  # it that way; this line records which model carries the constraint.
+  worker_multi_agent=$(jq -r --arg model "$worker_model" '
+    [.. | objects | select(.slug? == $model) | .multi_agent_version?] | map(select(. != null)) | first // "unknown"
+  ' "$cache_path")
+  printf 'PREFLIGHT-PASS worker=%s (multi_agent=%s) mechanism=%s reviewer=%s reviewer_mechanism=%s cache=%s\n' \
+    "$worker_model" "$worker_multi_agent" "$worker_mechanism" "$reviewer_model" "$reviewer_mechanism" "$cache_path"
 }
 
 workspace_ignore_one() {

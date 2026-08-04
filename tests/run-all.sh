@@ -16,7 +16,7 @@ mode-selection.sh
 worktree-fallback.sh
 intent-routing.sh
 config-optional.sh
-effort-override.sh
+runtime-override.sh
 gate-evidence.sh
 no-model-escalation.sh
 gates-mode-invariant.sh

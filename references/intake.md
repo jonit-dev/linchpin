@@ -120,18 +120,25 @@ base = "auto"         # auto = repository default branch
 review = true         # false is accepted only when explicitly typed
 max_lanes = 4
 prd_floor = 3
+worker = ""           # "" = use the runtime.md pin; luna | sol | terra
 worker_effort = ""    # "" = use the runtime.md pin; low | medium | high | max
+reviewer = ""         # "" = use the runtime.md pin; luna | sol | terra
 reviewer_effort = ""  # "" = use the runtime.md pin; low | medium | high | max
 ```
 
-`worker_effort` and `reviewer_effort` are how a repository raises or lowers a
-role's reasoning effort without editing `references/runtime.md`, which ships
-inside the plugin and is overwritten by an upgrade. An unrecognized value fails
+These four keys are how a repository changes which model runs a role, and at
+what effort, without editing `references/runtime.md` — that file ships inside
+the plugin and an upgrade overwrites it. An unrecognized value fails
 configuration validation rather than reaching a `codex exec` once per lane.
 
-There is deliberately no model key. Preflight verifies the worker model's
-declared capability, so a substituted model is a run that stopped being the run
-that was checked. Effort is a dial on the pinned role; the model is the role.
+`worker` and `reviewer` take an **alias** from the Model aliases table in
+`references/runtime.md`, never a raw slug. That table is the single place a slug
+appears, so adding a model is one edit. An alias with no row is a configuration
+failure, not a model request that reaches the API.
+
+Preflight then verifies both resolved models against the local cache before any
+branch exists. A configured model missing from the cache is a hard refusal with
+no fallback, exactly as a missing default would be.
 
 Unknown keys and invalid values fail configuration validation. Natural-language
 overrides are written to this file before scheduling so the conversational and

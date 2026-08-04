@@ -34,5 +34,7 @@ copy_repo() {
 assert_contains() {
   haystack="$1"
   needle="$2"
-  printf '%s\n' "$haystack" | grep -Fq "$needle" || fail "missing expected text: $needle"
+  # `--` or the needle is read as grep options the moment it starts with a dash,
+  # which is exactly what asserting on a command line looks like.
+  printf '%s\n' "$haystack" | grep -Fq -- "$needle" || fail "missing expected text: $needle"
 }
