@@ -7,9 +7,9 @@
 
 A Codex plugin that takes your PRDs and builds them.
 
-You point it at one PRD or ten. It splits the work into lanes, runs each lane in
-its own git worktree, has a separate read-only reviewer check the result, and
-reports what shipped and what did not. Your Codex session stays in charge as the
+Hand it a batch. It splits the work into lanes, runs each lane in its own git
+worktree, has a separate read-only reviewer check the result, and reports what
+shipped and what did not. Your Codex session stays in charge as the
 manager; the implementation happens in `codex exec` subprocesses.
 
 Codex only. Claude Code is not supported.
@@ -34,11 +34,19 @@ has.
 
 ## Using it
 
-Ask for a PRD, ask for an implementation, or ask it to run PRDs you already
-wrote:
+It pays off most with a batch. One PRD works and takes the same path, but a
+folder of them is where the parallel lanes earn their keep: hand it everything
+you queued up and walk away.
 
 ```
 $linchpin run docs/PRDs/PRD-007.md docs/PRDs/PRD-008.md
+```
+
+Point it at a directory and it takes every PRD in there. Plain English around
+the paths is fine, and an `@Linchpin` mention works the same as `$linchpin`:
+
+```
+/goal execute docs/PRDs/active/client-e2e-tests these PRDs with @Linchpin
 ```
 
 "start", "begin", "launch" and "resume" mean execute. Naming files you already
