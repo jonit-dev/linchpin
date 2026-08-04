@@ -5,8 +5,19 @@ description: Route PRD creation, upgrade, and execution requests through the lin
 
 # linchpin router
 
-The `references/` directory is at the plugin root, beside `skills/`; from this
-file resolve it as `../../references/`. Read `references/intake.md` before dispatch. This skill is a thin entry point;
+The `references/`, `scripts/`, and `skills/` directories all sit at the plugin
+root, so from this file the plugin root is `../..`. Resolve every path in this
+skill against that root — never against a path you assemble from the plugin
+name and version. The installed layout nests the marketplace above the plugin
+(`.../cache/<marketplace>/<plugin>/<version>/`), so a guessed absolute path is
+wrong by one segment and the first read fails. If you do not already know this
+file's absolute path, discover the root once:
+
+```sh
+find "${CODEX_HOME:-$HOME/.codex}/plugins" -type f -path '*/linchpin/*/references/intake.md' | head -1
+```
+
+Read `references/intake.md` before dispatch. This skill is a thin entry point;
 the intake reference owns the rules. The runtime pins are in
 `references/runtime.md`, and the manager uses `scripts/linchpin.sh` for the
 machine-checkable preflight, contract, and mode decisions.

@@ -709,7 +709,12 @@ brief() {
     esac
   fi
   [ -n "$delivery_mode" ] || delivery_mode="$delivery"
-  printf '%s\n' "$lane_id" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || die 'lane identity is malformed'
+  # An error that names no value cannot be acted on inside a batch loop: the
+  # caller cannot tell which lane failed, and abandons the loop for hand-unrolled
+  # invocations. Every rejection echoes the offending value.
+  [ -n "$lane_id" ] || die "lane identity is empty for $prd; pass LANE_ID as the first metadata argument"
+  printf '%s\n' "$lane_id" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$' ||
+    die "lane identity is malformed: '$lane_id' (allowed: alphanumeric start, then A-Z a-z 0-9 . _ / -)"
   case "$lane_mode" in parallel|sequential) ;; *) die "lane mode must be parallel or sequential: $lane_mode" ;; esac
   case "$delivery_mode" in pr|branch) ;; *) die "delivery mode must be pr or branch: $delivery_mode" ;; esac
   require_file "$prd"
@@ -724,6 +729,25 @@ brief() {
   brief_emit "$prd" "$lane_id" "$lane_mode" "$delivery_mode"
 }
 
+brief_rules() {
+  # One definition, read by both the emitter and the checker. Two copies of a
+  # rule string is how the check silently stops matching what ships.
+  rule_prohibited='Prohibited actions: native Luna spawning; runtime tier changes; unsafe external install/swap actions'
+  rule_scope='Scope rule: change only the files this PRD covers. Do not delete, move, or edit an unrelated file, do not bump an unrelated dependency, and do not bundle unrelated work into this lane. Something outside scope that looks wrong is a note in your report, not an edit. This rule bounds WHAT you change; it never forbids committing what you did change.'
+  rule_gate='Gate rule: every negative control this PRD declares needs observed-red evidence before delivery. A control the PRD never declared is not invented here.'
+  # Workers told only what to change left the result uncommitted in the working
+  # tree, and each of those lanes cost a second worker whose only task was `git
+  # commit`. Two things caused it: the requirement lived in the manager's skill
+  # and never reached the worker's prompt, and the only sentence containing the
+  # word "commit" was a prohibition, which workers read as "do not commit".
+  rule_commit='Commit rule: your lane is not done until your work is committed on this lane branch, inside your own working directory. An uncommitted working tree is PARTIAL, not a delivery, however complete the code is. Stage the in-scope files by explicit path (never `git add -A`), commit them, and report the resulting commit sha in your final summary. Do not push, open a PR, merge, rebase, or switch branches; the manager owns delivery.'
+  # One PRD in the field declared "Nothing was committed or pushed" as its own
+  # acceptance criterion. The worker correctly abstained and was handed a
+  # pointless repair round for it. The PRD outranks this default.
+  rule_commit_exception='Commit rule exception: if this PRD explicitly requires that nothing be committed or pushed, follow the PRD. Say plainly in your summary that you left the tree uncommitted and quote the criterion that required it. That is a completed lane, not a partial one.'
+  rule_environment='Environment rule: your working directory may be a fresh git worktree with no installed dependencies and no editor tooling. Before concluding that a declared gate cannot run, bootstrap what the repository already specifies (its lockfile install, its pinned runtime version) and name the exact command you ran. Report a gate blocked by a sandbox restriction or an unbuilt environment as a setup result, with the exact error, and never as a verification result. If the repository test config excludes the directory you are working in, say so and report the override you used.'
+}
+
 brief_emit() {
   prd="$1"
   lane_id="$2"
@@ -733,9 +757,14 @@ brief_emit() {
   printf 'Source PRD: %s\n' "$prd"
   printf 'Lane identity: %s\n' "$lane_id"
   printf '%s\n' 'Files (N) parsed:'
+  # `files_list` still prints paths on the way to a non-zero exit, so a non-empty
+  # `brief_files` does not mean the set resolved. Record which branch actually
+  # ran; anything downstream that asks "was there a file set?" must read this.
   if brief_files=$(files_list "$prd" 2>/dev/null) && [ -n "$brief_files" ]; then
+    brief_files_resolved=yes
     printf '%s\n' "$brief_files" | sed 's/^/- /'
   else
+    brief_files_resolved=no
     printf '%s\n' '- UNPARSED: this PRD does not use machine-readable `Files (N)` lists.' \
       '- Read the phase file lists in the PRD itself and follow them as written.' \
       '- Its lane is grouped from the paths it names in prose, or alone if it names none.'
@@ -758,9 +787,81 @@ brief_emit() {
   printf 'Runtime invocation: worker=%s; reviewer=%s\n' "$worker_invocation" "$reviewer_invocation"
   printf 'Lane mode: %s\n' "$lane_mode"
   printf 'Delivery mode: %s\n' "$delivery_mode"
-  printf '%s\n' 'Prohibited actions: native Luna spawning; runtime tier changes; unsafe external install/swap actions'
-  printf '%s\n' 'Scope rule: change only the files this PRD covers. Do not delete, move, or edit an unrelated file, do not bump an unrelated dependency, and do not bundle unrelated work into this lane commit. Something outside scope that looks wrong is a note in your report, not an edit.'
-  printf '%s\n' 'Gate rule: every negative control this PRD declares needs observed-red evidence before delivery. A control the PRD never declared is not invented here.'
+  brief_rules
+  printf '%s\n' "$rule_prohibited" "$rule_scope" "$rule_gate" "$rule_commit" "$rule_commit_exception" "$rule_environment"
+  if [ "$brief_files_resolved" = no ]; then
+    printf '%s\n' 'File-set rule: this PRD declares no machine-readable file set, so establish your own from the PRD prose before you start and list every path you touched in your final summary. Without a resolved file set there is nothing definite to stage, and lanes in that position have ended with correct work left uncommitted.'
+  fi
+}
+
+review_brief() {
+  prd=''
+  lane_id=''
+  commit_sha=''
+  gates_file=''
+  brief_out=''
+  positional_count=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --gates) [ "$#" -ge 2 ] || die 'review-brief --gates needs a path'; gates_file="$2"; shift 2 ;;
+      --commit) [ "$#" -ge 2 ] || die 'review-brief --commit needs a sha'; commit_sha="$2"; shift 2 ;;
+      --out) [ "$#" -ge 2 ] || die 'review-brief --out needs a path'; brief_out="$2"; shift 2 ;;
+      *)
+        positional_count=$((positional_count + 1))
+        case "$positional_count" in
+          1) prd="$1" ;;
+          2) lane_id="$1" ;;
+          *) die "review-brief accepts at most two positional arguments: got '$1'" ;;
+        esac
+        shift
+        ;;
+    esac
+  done
+  [ -n "$prd" ] || die 'usage: linchpin.sh review-brief PRD LANE_ID --gates PATH --commit SHA [--out PATH]'
+  [ -n "$lane_id" ] || die "lane identity is empty for $prd; pass LANE_ID as the second argument"
+  printf '%s\n' "$lane_id" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$' ||
+    die "lane identity is malformed: '$lane_id' (allowed: alphanumeric start, then A-Z a-z 0-9 . _ / -)"
+  # The reviewer runs read-only and cannot install dependencies or run the
+  # repository's gates. A review launched without the manager's gate evidence
+  # can only report what it was unable to do, so the evidence is required here
+  # rather than left to the manager to remember.
+  [ -n "$gates_file" ] ||
+    die 'review-brief requires --gates PATH: run the gates yourself and pass the Gate Evidence table, or the read-only reviewer can only report what it could not run'
+  require_file "$gates_file"
+  # A reviewer cannot review a working tree it cannot see. An uncommitted lane
+  # is a worker-contract failure; it is not a question to put to the reviewer.
+  [ -n "$commit_sha" ] ||
+    die 'review-brief requires --commit SHA: an uncommitted lane is PARTIAL, not reviewable — get the worker commit first'
+  require_file "$prd"
+  if [ -n "$brief_out" ]; then
+    review_brief_emit "$prd" "$lane_id" "$commit_sha" "$gates_file" > "$brief_out"
+    printf 'REVIEW-BRIEF-WRITTEN %s\n' "$brief_out"
+    return
+  fi
+  review_brief_emit "$prd" "$lane_id" "$commit_sha" "$gates_file"
+}
+
+review_brief_emit() {
+  prd="$1"
+  lane_id="$2"
+  commit_sha="$3"
+  gates_file="$4"
+  printf '%s\n' 'REVIEW BRIEF: read-only lane review'
+  printf 'Source PRD: %s\n' "$prd"
+  printf 'Lane identity: %s\n' "$lane_id"
+  printf 'Lane commit under review: %s\n' "$commit_sha"
+  printf '%s\n' '' '## Acceptance Criteria (verbatim)'
+  brief_section "$prd" 'Acceptance Criteria' 'Acceptance'
+  printf '%s\n' '' '## Negative Controls (verbatim)'
+  brief_section "$prd" 'Negative Controls' 'Verification'
+  printf '%s\n' '' '## Manager Gate Evidence (already run; treat as established fact)'
+  cat "$gates_file"
+  printf '%s\n' '' '## Review rules'
+  printf '%s\n' 'You are read-only by design. You cannot install dependencies, write files, or run this repository'"'"'s gates. That is the expected condition of this role, not a finding. The gate results above were run by the manager in a writable tree; do not re-derive them and do not report their absence.'
+  printf '%s\n' 'Review the committed diff by reading it. The findings that matter here are the ones only a reader can reach: a negative control that stays green when the feature is removed, a field the code accepts and never maps, a document that claims behavior the code contradicts, an acceptance criterion nothing actually satisfies.'
+  printf '%s\n' 'Label every finding exactly one of DEFECT or EVIDENCE-GAP. DEFECT: something is wrong in the diff and you can name it with a file:line. EVIDENCE-GAP: the work may be correct but a result you would want was not supplied. Give every DEFECT a file:line and the concrete consequence.'
+  printf '%s\n' 'Verdict is APPROVE or REQUEST_CHANGES on the last line as `VERDICT: <value>`. REQUEST_CHANGES requires at least one DEFECT. An EVIDENCE-GAP never blocks delivery on its own; record it and APPROVE.'
+  printf '%s\n' 'Facts stated in this brief are context, not findings. Do not treat a fact you were handed as a defect you discovered, and do not open a finding merely to have one. APPROVE with zero findings is a valid and useful review.'
 }
 
 brief_check() {
@@ -781,15 +882,20 @@ brief_check() {
   [ "$metadata_count" -eq 1 ] || die 'worker brief delivery mode is missing or duplicated'
   metadata_count=$(grep -Ec '^Delivery mode: (pr|branch)$' "$brief_file" || true)
   [ "$metadata_count" -eq 1 ] || die 'worker brief delivery mode is malformed'
-  for metadata_prefix in 'Worker runtime:' 'Reviewer runtime:' 'Runtime invocation:' 'Prohibited actions:' 'Scope rule:'; do
+  for metadata_prefix in 'Worker runtime:' 'Reviewer runtime:' 'Runtime invocation:' 'Prohibited actions:' 'Scope rule:' 'Commit rule:' 'Commit rule exception:' 'Environment rule:'; do
     metadata_count=$(grep -Fc "$metadata_prefix" "$brief_file" || true)
     [ "$metadata_count" -eq 1 ] || die "worker brief metadata is missing or duplicated: $metadata_prefix"
   done
   require_exact_line "Worker runtime: $worker_runtime" "$brief_file" || die 'worker brief Worker runtime metadata is missing or stale'
   require_exact_line "Reviewer runtime: $reviewer_runtime" "$brief_file" || die 'worker brief Reviewer runtime metadata is missing or stale'
   require_exact_line "Runtime invocation: worker=$worker_invocation; reviewer=$reviewer_invocation" "$brief_file" || die 'worker brief runtime invocation is missing or stale'
-  require_exact_line 'Prohibited actions: native Luna spawning; runtime tier changes; unsafe external install/swap actions' "$brief_file" || die 'worker brief prohibited-actions metadata is missing or malformed'
-  require_exact_line 'Scope rule: change only the files this PRD covers. Do not delete, move, or edit an unrelated file, do not bump an unrelated dependency, and do not bundle unrelated work into this lane commit. Something outside scope that looks wrong is a note in your report, not an edit.' "$brief_file" || die 'worker brief scope rule is missing or malformed'
+  brief_rules
+  require_exact_line "$rule_prohibited" "$brief_file" || die 'worker brief prohibited-actions metadata is missing or malformed'
+  require_exact_line "$rule_scope" "$brief_file" || die 'worker brief scope rule is missing or malformed'
+  require_exact_line "$rule_gate" "$brief_file" || die 'worker brief gate rule is missing or malformed'
+  require_exact_line "$rule_commit" "$brief_file" || die 'worker brief commit rule is missing or malformed'
+  require_exact_line "$rule_commit_exception" "$brief_file" || die 'worker brief commit-rule exception is missing or malformed'
+  require_exact_line "$rule_environment" "$brief_file" || die 'worker brief environment rule is missing or malformed'
 
   brief_temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/linchpin-brief-check.XXXXXX")
   trap 'rm -rf -- "$brief_temp_dir"' EXIT HUP INT TERM
@@ -1250,6 +1356,52 @@ preflight_model() {
   printf 'PREFLIGHT-PASS worker=%s mechanism=%s reviewer=%s cache=%s\n' "$worker_model" "$worker_mechanism" "$reviewer_mechanism" "$cache_path"
 }
 
+workspace_ignore_one() {
+  # `git check-ignore` is the only honest test: a repo that already ignores the
+  # path through any mechanism needs no second entry.
+  workspace_path="$1"
+  if git -C "$workspace_repo" check-ignore -q "$workspace_path" 2>/dev/null; then
+    printf 'WORKSPACE-ALREADY-IGNORED %s\n' "$workspace_path"
+    return
+  fi
+  # `.git/info/exclude`, not `.gitignore`. Ignoring our own scratch output must
+  # not itself show up as a modified tracked file in the user's `git status`,
+  # and must not ride along in a lane commit.
+  workspace_exclude="$workspace_git_dir/info/exclude"
+  mkdir -p "$workspace_git_dir/info"
+  [ -f "$workspace_exclude" ] || : > "$workspace_exclude"
+  if [ -s "$workspace_exclude" ] && [ "$(tail -c 1 "$workspace_exclude" | od -An -c | tr -d ' \n')" != '\n' ]; then
+    printf '\n' >> "$workspace_exclude"
+  fi
+  printf '%s\n' "$workspace_path" >> "$workspace_exclude"
+  printf 'WORKSPACE-IGNORED %s .git/info/exclude\n' "$workspace_path"
+}
+
+workspace() {
+  workspace_repo="${1:-${LINCHPIN_CONFIG_DIR:-$PWD}}"
+  [ -d "$workspace_repo" ] || die "workspace target is not a directory: $workspace_repo"
+  command -v git >/dev/null 2>&1 || die 'git is required to prepare a linchpin workspace'
+  git -C "$workspace_repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+    die "workspace target is not a Git repository: $workspace_repo"
+  # The COMMON git dir, not the per-worktree one. Inside a linked worktree
+  # `--absolute-git-dir` resolves to `.git/worktrees/<name>`, whose `info/exclude`
+  # git never reads — the entry would be written to a file with no effect, which
+  # is worse than not writing it. Linchpin runs lanes in worktrees, so this is
+  # the common case, not the edge case.
+  workspace_git_dir=$(git -C "$workspace_repo" rev-parse --git-common-dir)
+  case "$workspace_git_dir" in
+    /*) ;;
+    # Older git returns this relative to the working directory.
+    *) workspace_git_dir=$(CDPATH= cd -- "$workspace_repo/$workspace_git_dir" && pwd) ;;
+  esac
+  # Claim the ignore entries BEFORE the first write. A run directory that
+  # appears in `git status` is leftover the user has to clean up by hand.
+  workspace_ignore_one '.linchpin/'
+  workspace_ignore_one '.worktrees/'
+  mkdir -p "$workspace_repo/.linchpin"
+  printf 'WORKSPACE-READY %s\n' "$workspace_repo/.linchpin"
+}
+
 usage() {
   cat <<'USAGE'
 linchpin.sh COMMAND [ARGS]
@@ -1260,12 +1412,15 @@ linchpin.sh COMMAND [ARGS]
   brief PRD [LANE_ID LANE_MODE DELIVERY_MODE]        emit the worker brief
         [--out PATH] [--config-dir DIR]
   brief-check PRD BRIEF                              verify a brief against its PRD
+  review-brief PRD LANE_ID --gates PATH --commit SHA emit the read-only review brief
+        [--out PATH]
   files PRD                                          print the parsed Files (N) list
   mode EXECUTION PRD... [--config-dir DIR]           group lanes by file collision
   schedule EXECUTION STATUS LANE... [--config-dir DIR]
         STATUS: ok | worktree-fail | dirty-tree | unparsed-files | config
   gate PRD REPORT                                    check observed-red evidence
   config [REPO]                                      print resolved .linchpin.toml
+  workspace [REPO]                                   make .linchpin/ and ignore run output
   preflight [MODELS_CACHE.json]                      check the worker model
   help                                               this text
 
@@ -1280,6 +1435,7 @@ case "$command_name" in
   migrate) [ "$#" -ge 1 ] || die 'usage: linchpin.sh migrate PRD [--out PATH] [--force]'; migrate "$@" ;;
   brief) [ "$#" -ge 1 ] || die 'usage: linchpin.sh brief PRD [LANE_ID LANE_MODE DELIVERY_MODE] [--config-dir DIR]'; brief "$@" ;;
   brief-check) [ "$#" -eq 2 ] || die 'usage: linchpin.sh brief-check PRD BRIEF'; brief_check "$1" "$2" ;;
+  review-brief) [ "$#" -ge 1 ] || die 'usage: linchpin.sh review-brief PRD LANE_ID --gates PATH --commit SHA [--out PATH]'; review_brief "$@" ;;
   files)
     [ "$#" -eq 1 ] || die 'usage: linchpin.sh files PRD'
     if ! files_list "$1"; then
@@ -1290,6 +1446,7 @@ case "$command_name" in
     ;;
   help|--help|-h) usage; exit 0 ;;
   config) [ "$#" -le 1 ] || die 'usage: linchpin.sh config [repo]'; config_values "${1:-${LINCHPIN_CONFIG_DIR:-$PWD}}" ;;
+  workspace) [ "$#" -le 1 ] || die 'usage: linchpin.sh workspace [repo]'; workspace "${1:-}" ;;
   route) [ "$#" -ge 1 ] || die 'usage: linchpin.sh route INTENT [SCORE] [PRD ...] [--config-dir DIR]'; route "$@" ;;
   mode) [ "$#" -ge 2 ] || die 'usage: linchpin.sh mode EXECUTION PRD...'; mode_selection "$@" ;;
   schedule) [ "$#" -ge 3 ] || die 'usage: linchpin.sh schedule EXECUTION WORKTREE_STATUS LANE...'; schedule "$@" ;;

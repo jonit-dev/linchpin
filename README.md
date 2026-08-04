@@ -65,6 +65,28 @@ Omit `.linchpin.toml` for zero-config defaults. If present, it can set
 `execution`, `delivery`, `base`, `review`, `max_lanes`, and `prd_floor` as
 documented in `references/intake.md`.
 
+## What a run leaves behind
+
+A run writes its ledger, briefs, and lane logs to `.linchpin/` in the target
+repository, and its worktrees to `.worktrees/`. Neither belongs to you, so
+neither should land in your `git status`:
+
+```sh
+sh scripts/linchpin.sh workspace .
+```
+
+The coordinator runs this before its first write. It creates `.linchpin/` and
+adds both paths to `.git/info/exclude` unless the repository already ignores
+them. `.git/info/exclude` rather than `.gitignore` is deliberate: ignoring
+Linchpin's own scratch output must not leave a modified tracked file behind, or
+sweep into a lane commit. If you would rather commit the ignore rule for your
+team, add `.linchpin/` to `.gitignore` yourself.
+
+`.linchpin/` is the run record — keep it to resume or audit a run, delete it
+when you are done. Worktrees and merged lane branches are removed at the end of
+the run. A lane that ended `PARTIAL` or `BLOCKED` keeps its worktree and branch
+on purpose; the final report names each one and the command that resumes it.
+
 ## Runtime boundary
 
 The runtime pins and delegation rule live only in `references/runtime.md`.

@@ -140,6 +140,8 @@ Run preflight before making branches or starting workers:
 | Check | Result on failure |
 |---|---|
 | current path is a Git repository | refuse and name the repository error |
+| `workspace` has claimed `.linchpin/` and `.worktrees/` in the repository's ignore rules | refuse to write run output that would land in the user's `git status` |
+| the PR client and the repository's permitted merge methods are known | announce branch delivery fallback; never discover this at the first merge |
 | runtime model cache contains the configured worker model with its required capability | refuse; never fall back |
 | worktree creation succeeds | announce sequential fallback for that lane group |
 | current tree is clean or safely stashable | announce sequential fallback |

@@ -7,6 +7,9 @@ contract-conformance.sh
 execute-as-written.sh
 legacy-migration.sh
 brief-contains-ledger.sh
+brief-requires-commit.sh
+review-brief-carries-gates.sh
+workspace-ignored.sh
 files-list-parseable.sh
 single-is-swarm-of-one.sh
 mode-selection.sh
