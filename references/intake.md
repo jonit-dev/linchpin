@@ -120,7 +120,18 @@ base = "auto"         # auto = repository default branch
 review = true         # false is accepted only when explicitly typed
 max_lanes = 4
 prd_floor = 3
+worker_effort = ""    # "" = use the runtime.md pin; low | medium | high | max
+reviewer_effort = ""  # "" = use the runtime.md pin; low | medium | high | max
 ```
+
+`worker_effort` and `reviewer_effort` are how a repository raises or lowers a
+role's reasoning effort without editing `references/runtime.md`, which ships
+inside the plugin and is overwritten by an upgrade. An unrecognized value fails
+configuration validation rather than reaching a `codex exec` once per lane.
+
+There is deliberately no model key. Preflight verifies the worker model's
+declared capability, so a substituted model is a run that stopped being the run
+that was checked. Effort is a dial on the pinned role; the model is the role.
 
 Unknown keys and invalid values fail configuration validation. Natural-language
 overrides are written to this file before scheduling so the conversational and
@@ -131,7 +142,9 @@ is never inferred from a missing service.
 The helper resolves `.linchpin.toml` from the target repository directory. For
 isolated helper tests or an explicitly supplied target, set
 `LINCHPIN_CONFIG_DIR=/path/to/repo` or pass `--config-dir /path/to/repo` to
-`route`, `mode`, `schedule`, or `brief`. The file remains optional.
+`route`, `mode`, `schedule`, `brief`, or `brief-check`. A brief and its check
+must resolve the same config, or the check reads a stale runtime pin and
+rejects a brief that is correct. The file remains optional.
 
 ## Capability preflight
 

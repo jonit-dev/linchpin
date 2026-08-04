@@ -61,9 +61,32 @@ scaffolded, then reports one of:
 
 `sh scripts/linchpin.sh contract <prd>` reports every problem in one run.
 
-Omit `.linchpin.toml` for zero-config defaults. If present, it can set
-`execution`, `delivery`, `base`, `review`, `max_lanes`, and `prd_floor` as
-documented in `references/intake.md`.
+## Customizing a run
+
+Everything tunable lives in one optional file, `.linchpin.toml`, in the target
+repository. Omit it for zero-config defaults:
+
+```toml
+execution = "auto"       # auto | parallel | sequential
+delivery = "pr"          # pr | branch
+base = "auto"            # auto = repository default branch
+review = true
+max_lanes = 4
+prd_floor = 3
+worker_effort = ""       # "" = shipped pin; low | medium | high | max
+reviewer_effort = ""     # "" = shipped pin; low | medium | high | max
+```
+
+`sh scripts/linchpin.sh config .` prints the resolved values, including which
+defaults are in force. An invalid key or value fails there, before a run starts,
+rather than once per lane in the middle of one.
+
+Effort is configurable per repository so that raising a role does not mean
+editing `references/runtime.md`, which ships inside the plugin and is
+overwritten on upgrade. The model is not configurable: preflight verifies the
+worker model's declared capability, so substituting one produces a run that was
+never checked. Nothing in the file weakens review, gate evidence, or the
+inherited controls — those follow the PRD, not the config.
 
 ## What a run leaves behind
 

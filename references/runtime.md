@@ -10,7 +10,7 @@ plugin. Skills refer here; they do not copy these values into their own bodies.
 | Manager | `gpt-5.6-sol` | `medium` | current Codex session | intake, briefs, scheduling, evidence, integration |
 | Author | `gpt-5.6-sol` | `high` | `codex exec` | authoring a new PRD in `prd-creator` |
 | Worker | `gpt-5.6-luna` | `max` | `codex exec` | implementation, repair, tests, conflict resolution |
-| Reviewer | `gpt-5.6-sol` | `medium` | `codex exec --sandbox read-only` | one independent review per lane |
+| Reviewer | `gpt-5.6-sol` | `high` | `codex exec --sandbox read-only` | one independent review per lane |
 
 Writing a PRD is the decision that every lane inherits, so it runs at the
 Author row's higher effort rather than the manager's. Upgrade mode and any
@@ -24,6 +24,11 @@ gap-filling pass use the same row.
    spawning speaks v2.
 2. The manager reads this table when launching a worker; it must not substitute
    a different model, effort, or tier. Terra and any third tier are out of scope.
+   The one legitimate change is a repo-local `worker_effort` or
+   `reviewer_effort` in `.linchpin.toml`, declared by the user before the run
+   starts and applied uniformly to every lane. That is configuration. What this
+   rule forbids is the manager moving a tier *during* a run — especially to get
+   past a gate that failed. No config key substitutes a model.
 3. Sol review is launched with `codex exec --sandbox read-only`, so the reviewer
    cannot edit, commit, push, merge, or repair the lane.
 4. Worker, repair, integration, and conflict processes all use the Worker row.

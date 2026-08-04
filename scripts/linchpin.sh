@@ -42,6 +42,13 @@ runtime_metadata() {
   reviewer_model=$(runtime_value Reviewer 3)
   reviewer_effort=$(runtime_value Reviewer 4)
   reviewer_mechanism=$(runtime_value Reviewer 5)
+  # A repo-local effort override, declared before the run starts, is the user's
+  # call. It is not the forbidden thing: what the delegation rules prohibit is
+  # the MANAGER changing tier mid-run to get past a gate that failed. The model
+  # itself stays pinned — preflight verifies the worker model's capability, and
+  # substituting one is how a run silently stops being the run that was checked.
+  [ -z "${cfg_worker_effort:-}" ] || worker_effort="$cfg_worker_effort"
+  [ -z "${cfg_reviewer_effort:-}" ] || reviewer_effort="$cfg_reviewer_effort"
   [ -n "$worker_model" ] || die 'runtime.md has no Worker model pin'
   [ -n "$worker_effort" ] || die 'runtime.md has no Worker effort pin'
   [ "$worker_mechanism" = 'codex exec' ] || die 'runtime.md Worker mechanism is not codex exec'
@@ -613,6 +620,8 @@ load_config() {
       review) review="$config_value" ;;
       max_lanes) max_lanes="$config_value" ;;
       prd_floor) prd_floor="$config_value" ;;
+      worker_effort) cfg_worker_effort="$config_value" ;;
+      reviewer_effort) cfg_reviewer_effort="$config_value" ;;
     esac
   done <<EOF
 $resolved_config
@@ -865,10 +874,31 @@ review_brief_emit() {
 }
 
 brief_check() {
-  prd="$1"
-  brief_file="$2"
+  prd=''
+  brief_file=''
+  config_dir=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --config-dir) [ "$#" -ge 2 ] || die 'brief-check --config-dir needs a path'; config_dir="$2"; shift 2 ;;
+      # `brief` accepts the joined form, so `brief-check` must too; otherwise the
+      # same flag typed the same way fails on one command and not the other.
+      --config-dir=*) config_dir="${1#--config-dir=}"; shift ;;
+      --*) die "brief-check does not accept the option: $1" ;;
+      *)
+        if [ -z "$prd" ]; then prd="$1"
+        elif [ -z "$brief_file" ]; then brief_file="$1"
+        else die "brief-check accepts at most two positional arguments: got '$1'"
+        fi
+        shift
+        ;;
+    esac
+  done
+  [ -n "$prd" ] && [ -n "$brief_file" ] || die 'usage: linchpin.sh brief-check PRD BRIEF [--config-dir DIR]'
   require_file "$prd"
   require_file "$brief_file"
+  # The checker must resolve the same effort overrides the emitter used, or a
+  # brief built under a repo-local override fails its own verification.
+  load_config "$config_dir"
   runtime_metadata
   metadata_count=$(grep -Ec '^Lane identity:' "$brief_file" || true)
   [ "$metadata_count" -eq 1 ] || die 'worker brief lane identity is missing or duplicated'
@@ -918,6 +948,9 @@ config_values() {
   review=true
   max_lanes=4
   prd_floor=3
+  # Empty means "use the pin in runtime.md" — the zero-config default.
+  worker_effort_override=
+  reviewer_effort_override=
   if [ -f "$config_file" ]; then
     while IFS= read -r raw || [ -n "$raw" ]; do
       line=$(printf '%s' "$raw" | sed 's/[[:space:]]*#.*$//')
@@ -934,6 +967,8 @@ config_values() {
         review) review="$value" ;;
         max_lanes) max_lanes="$value" ;;
         prd_floor) prd_floor="$value" ;;
+        worker_effort) worker_effort_override="$value" ;;
+        reviewer_effort) reviewer_effort_override="$value" ;;
         *) die "unknown .linchpin.toml key: $key" ;;
       esac
     done < "$config_file"
@@ -946,8 +981,19 @@ config_values() {
   case "$review" in true|false) ;; *) die "review must be true or false" ;; esac
   case "$max_lanes" in *[!0-9]*|0|"") die "max_lanes must be a positive integer" ;; esac
   case "$prd_floor" in *[!0-9]*|"") die "prd_floor must be a non-negative integer" ;; esac
-  printf 'execution=%s\ndelivery=%s\nbase=%s\nreview=%s\nmax_lanes=%s\nprd_floor=%s\n' \
-    "$execution" "$delivery" "$base" "$review" "$max_lanes" "$prd_floor"
+  # An unrecognized effort must fail here rather than reach a `codex exec` that
+  # rejects it once per lane, after the run is already underway.
+  case "$worker_effort_override" in
+    ''|low|medium|high|max) ;;
+    *) die "worker_effort must be low, medium, high, or max: $worker_effort_override" ;;
+  esac
+  case "$reviewer_effort_override" in
+    ''|low|medium|high|max) ;;
+    *) die "reviewer_effort must be low, medium, high, or max: $reviewer_effort_override" ;;
+  esac
+  printf 'execution=%s\ndelivery=%s\nbase=%s\nreview=%s\nmax_lanes=%s\nprd_floor=%s\nworker_effort=%s\nreviewer_effort=%s\n' \
+    "$execution" "$delivery" "$base" "$review" "$max_lanes" "$prd_floor" \
+    "$worker_effort_override" "$reviewer_effort_override"
 }
 
 execute_intent='run|execute|start|begin|launch|resume|continue|kick off'
@@ -1411,7 +1457,7 @@ linchpin.sh COMMAND [ARGS]
   migrate PRD [--out PATH] [--force]                 write a v1 copy; never edits PRD
   brief PRD [LANE_ID LANE_MODE DELIVERY_MODE]        emit the worker brief
         [--out PATH] [--config-dir DIR]
-  brief-check PRD BRIEF                              verify a brief against its PRD
+  brief-check PRD BRIEF [--config-dir DIR]           verify a brief against its PRD
   review-brief PRD LANE_ID --gates PATH --commit SHA emit the read-only review brief
         [--out PATH]
   files PRD                                          print the parsed Files (N) list
@@ -1434,7 +1480,7 @@ case "$command_name" in
   contract) [ "$#" -eq 1 ] || die 'usage: linchpin.sh contract PRD'; contract_check "$1" ;;
   migrate) [ "$#" -ge 1 ] || die 'usage: linchpin.sh migrate PRD [--out PATH] [--force]'; migrate "$@" ;;
   brief) [ "$#" -ge 1 ] || die 'usage: linchpin.sh brief PRD [LANE_ID LANE_MODE DELIVERY_MODE] [--config-dir DIR]'; brief "$@" ;;
-  brief-check) [ "$#" -eq 2 ] || die 'usage: linchpin.sh brief-check PRD BRIEF'; brief_check "$1" "$2" ;;
+  brief-check) [ "$#" -ge 2 ] || die 'usage: linchpin.sh brief-check PRD BRIEF [--config-dir DIR]'; brief_check "$@" ;;
   review-brief) [ "$#" -ge 1 ] || die 'usage: linchpin.sh review-brief PRD LANE_ID --gates PATH --commit SHA [--out PATH]'; review_brief "$@" ;;
   files)
     [ "$#" -eq 1 ] || die 'usage: linchpin.sh files PRD'

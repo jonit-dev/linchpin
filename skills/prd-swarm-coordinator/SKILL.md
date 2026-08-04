@@ -16,10 +16,12 @@ take a shortcut. The `references/` directory is at the plugin root, beside
 any preflight or delegation. The executable checks live in
 `scripts/linchpin.sh`.
 
-The manager is the current session's Sol/medium role. Workers, repair workers,
-integration workers, and conflict workers use the Luna/max role only through
+The manager is the current session's Manager role. Workers, repair workers,
+integration workers, and conflict workers use the Worker role only through
 the `codex exec` subprocess shape in `references/runtime.md`. The reviewer is a
-fresh Sol/medium `codex exec --sandbox read-only` process. Never use a native
+fresh `codex exec --sandbox read-only` process at the Reviewer row's model and
+effort. Read those values from the table; an effort written into this sentence
+is a second copy that goes stale the first time the pin changes. Never use a native
 subagent for Luna, never change tier after a failed attempt, and use
 `codex exec resume <session-id>` only for a recorded continuation.
 
@@ -72,9 +74,13 @@ is a named degradation unless the user explicitly forced the unavailable mode.
 ## Contract-preserving worker brief
 
 Generate each brief with the resolved lane metadata, writing it to a file:
-`scripts/linchpin.sh brief <prd> <lane-id> <lane-mode> <delivery-mode> --out <brief-file>`,
-then verify it with `scripts/linchpin.sh brief-check <prd> <brief-file>` and
-pass that file's contents as the worker prompt. The brief is the handoff; a
+`scripts/linchpin.sh brief <prd> <lane-id> <lane-mode> <delivery-mode> --config-dir <target-repo> --out <brief-file>`,
+then verify it with
+`scripts/linchpin.sh brief-check <prd> <brief-file> --config-dir <target-repo>`
+and pass that file's contents as the worker prompt. Pass `--config-dir` to both:
+your working directory is not necessarily the target repository, and a brief
+emitted with the repository's config but checked without it fails its own
+verification on a stale runtime pin. The brief is the handoff; a
 prompt you compose yourself instead is a dropped ledger and a dropped scope rule.
 Resolve these values before invocation from `.linchpin.toml`, the
 file-intersection group, and delivery capability. With no config file, the
@@ -89,8 +95,11 @@ in this order:
 4. the complete Negative Controls table copied verbatim;
 5. the complete Acceptance Criteria and Checkpoint Protocol copied verbatim;
 6. the runtime-derived worker/reviewer invocation shapes, lane mode, delivery
-   mode, and prohibited actions. The model, effort, and mechanism values come
-   only from `references/runtime.md`.
+   mode, and prohibited actions. Model and mechanism come only from
+   `references/runtime.md`. Effort comes from there too unless the target
+   repository's `.linchpin.toml` sets `worker_effort` or `reviewer_effort`,
+   which is why the brief is generated with `--config-dir`. Read the emitted
+   values out of the brief rather than restating a pin from memory.
 
 Before launch, compare ledger row ids between source and brief. A missing row,
 caller, or control rejects the brief. The worker must not be asked to infer
@@ -264,8 +273,8 @@ Generate the review brief with the helper; it refuses to emit without both:
 scripts/linchpin.sh review-brief <prd> <lane-id> --gates <gate-evidence.md> --commit <sha> --out <review>
 ```
 
-Then launch exactly one fresh Sol/medium reviewer per lane through this shape,
-with all role values resolved from `references/runtime.md`:
+Then launch exactly one fresh reviewer per lane through this shape, with all
+role values resolved from the Reviewer row in `references/runtime.md`:
 
 ```text
 codex exec --model <Reviewer.Model> -c 'model_reasoning_effort="<Reviewer.Effort>"' --sandbox read-only -C <lane> <review>
