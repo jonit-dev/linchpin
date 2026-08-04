@@ -12,6 +12,19 @@ worktree, has a separate read-only reviewer check the result, and reports what
 shipped and what did not. Your Codex session stays in charge as the
 manager; the implementation happens in `codex exec` subprocesses.
 
+The default split is the whole idea:
+
+| Step | Who | Effort |
+|---|---|---|
+| Write the PRD | you, with whatever model you like (I use Opus 5) | — |
+| Implement the lane | Luna | `max` |
+| Review the lane | Sol, read-only, fresh process | `high` |
+
+Luna at max effort does the building. Sol at high effort checks it, in a
+separate process that cannot write. The model that wrote the code is never the
+model that approves it, and you are not paying manager-tier rates for the part
+that is mostly typing.
+
 Codex only. Claude Code is not supported.
 
 ## Install
