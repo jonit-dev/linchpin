@@ -1,6 +1,6 @@
 {
   "name": "linchpin",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Codex-only PRD swarm orchestration with contract-preserving intake.",
   "author": {
     "name": "Linchpin contributors",
@@ -19,8 +19,8 @@
     "displayName": "Linchpin",
     "composerIcon": "./assets/icon.png",
     "logo": "./assets/icon.png",
-    "shortDescription": "Contract-preserving PRD swarm orchestration",
-    "longDescription": "Route PRD creation and execution through a contract-preserving intake, then coordinate bounded Codex lanes with inherited gates, review, and explicit delivery states.",
+    "shortDescription": "Run PRDs as reviewed lanes",
+    "longDescription": "Hand it a folder of PRDs and it builds them. Each PRD runs in its own git worktree, so lanes work in parallel without stepping on each other. When a lane finishes, a separate reviewer model checks it in a read-only process, and delivery is gated on the checks the PRD itself asked for. The model that writes the code is never the model that approves it. You get a report of what shipped, what is blocked, and the command to resume anything unfinished.",
     "developerName": "Linchpin contributors",
     "category": "Productivity",
     "capabilities": [
