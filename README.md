@@ -3,7 +3,7 @@
 [![verify](https://github.com/jonit-dev/linchpin/actions/workflows/verify.yml/badge.svg)](https://github.com/jonit-dev/linchpin/actions/workflows/verify.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![codex plugin](https://img.shields.io/badge/codex-plugin-black.svg)](https://developers.openai.com/codex/)
-[![version](https://img.shields.io/badge/version-0.6.1-informational.svg)](.codex-plugin/plugin.json)
+[![version](https://img.shields.io/badge/version-0.6.2-informational.svg)](.codex-plugin/plugin.json)
 
 A Codex plugin that takes your PRDs and builds them.
 
