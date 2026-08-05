@@ -1,6 +1,6 @@
 {
   "name": "linchpin",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Codex-only PRD swarm orchestration with contract-preserving intake.",
   "author": {
     "name": "Linchpin contributors",
@@ -29,9 +29,9 @@
     ],
     "websiteURL": "https://github.com/jonit-dev/linchpin",
     "defaultPrompt": [
-      "Orchestrate one or more conforming PRDs with a Sol/Luna swarm.",
-      "Route a PRD request through the Linchpin intake contract.",
-      "Create or execute a contract-preserving PRD workflow."
+      "Run one or more PRDs as parallel, reviewed implementation lanes.",
+      "Turn this feature idea into a PRD I can review first.",
+      "Execute docs/PRDs/PRD-007.md and open a PR once review passes."
     ]
   }
 }
