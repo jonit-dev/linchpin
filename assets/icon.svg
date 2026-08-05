@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="linchpin">
+  <title>linchpin</title>
+  <!-- Three lanes crossed by one pin. A linchpin is the pin through the axle
+       that stops the wheel coming off; the lanes are what this plugin runs in
+       parallel, and the pin is the gate every one of them passes through. -->
+  <rect width="512" height="512" rx="112" fill="#14161A"/>
+
+  <g fill="#4A525E">
+    <rect x="140" y="104" width="52" height="304" rx="26"/>
+    <rect x="230" y="104" width="52" height="304" rx="26"/>
+    <rect x="320" y="104" width="52" height="304" rx="26"/>
+  </g>
+
+  <rect x="78" y="228" width="356" height="56" rx="28" fill="#FFB020"/>
+</svg>
