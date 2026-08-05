@@ -8,8 +8,11 @@ execute-as-written.sh
 legacy-migration.sh
 brief-contains-ledger.sh
 brief-requires-commit.sh
+no-lane-recursion.sh
 review-brief-carries-gates.sh
 workspace-ignored.sh
+lane-worktree-isolation.sh
+await-group-not-poll.sh
 files-list-parseable.sh
 single-is-swarm-of-one.sh
 mode-selection.sh

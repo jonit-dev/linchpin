@@ -66,14 +66,19 @@ The role values above are substituted into these shapes at runtime:
 ```text
 <codex> exec --model <Worker.Model> -c 'model_reasoning_effort="<Worker.Effort>"' -C <lane> "$(cat <brief-file>)"
 <codex> exec --model <Author.Model> -c 'model_reasoning_effort="<Author.Effort>"' -C <repo> "$(cat <creator-brief>)"
-<codex> exec --model <Reviewer.Model> -c 'model_reasoning_effort="<Reviewer.Effort>"' --sandbox read-only -C <lane> <review>
+<codex> exec --model <Reviewer.Model> -c 'model_reasoning_effort="<Reviewer.Effort>"' --sandbox read-only -C <lane> "$(cat <review-file>)"
 <codex> exec resume <session-id>
 ```
 
-The worker prompt is the generated brief, passed from the file
-`scripts/linchpin.sh brief ... --out <brief-file>` wrote. Do not retype or
-summarize it into a prompt of your own: a hand-written prompt drops the ledger,
-the controls, and the scope rule the brief exists to carry.
+Every prompt is a file read at invocation time, the reviewer's included. The
+worker prompt is what `scripts/linchpin.sh brief ... --out <brief-file>` wrote
+and the reviewer prompt is what `scripts/linchpin.sh review-brief ... --out
+<review-file>` wrote. Do not retype or summarize either into a prompt of your
+own: a hand-written prompt drops the ledger, the controls, and the scope rule
+the brief exists to carry. Do not interpolate the text into the command line
+either — a review packet contains backticks, quotes, and pipes, and a manager
+that shell-escaped one by hand sent it to `codex` as a mangled argument and then
+read `Reading additional input from stdin...` as a model response.
 
 The reviewer is never the worker's continuation. There is exactly one fresh
 review per PRD; Luna repairs findings and the manager verifies closure.
@@ -84,3 +89,11 @@ The preflight reads `$CODEX_HOME/models_cache.json` (or the explicitly supplied
 test cache) and looks up the Worker model. It must confirm the model exists and
 has the capability required by the Worker row. A missing cache, model, or
 capability is a hard refusal with no fallback.
+
+Preflight also confirms `$CODEX_HOME` is writable. Every `codex exec` child
+writes its own session state there before the model is contacted, so a
+read-only `$CODEX_HOME` kills the reviewer with `failed to initialize
+in-process app-server client` — at the end of a lane, after all the worker time
+is already spent. `--sandbox read-only` bounds what the reviewer may do to the
+*repository*; it never means the reviewer can run without a writable
+`$CODEX_HOME`.

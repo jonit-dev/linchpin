@@ -779,7 +779,13 @@ brief() {
 brief_rules() {
   # One definition, read by both the emitter and the checker. Two copies of a
   # rule string is how the check silently stops matching what ships.
-  rule_prohibited='Prohibited actions: native Luna spawning; runtime tier changes; unsafe external install/swap actions'
+  # A lane worker inherits the same plugin the manager is running, so the word
+  # "PRD" in its brief is enough to make it open the linchpin router and re-run
+  # intake on the PRD it was already handed. One field run spent a Luna/max turn
+  # printing `ROUTE-EXECUTE-CONFORMING` for a decision the manager had already
+  # made. Worse, a worker that reaches the coordinator starts scheduling lanes of
+  # its own inside a lane.
+  rule_prohibited='Prohibited actions: native Luna spawning; runtime tier changes; unsafe external install/swap actions; re-entering linchpin (do not read the linchpin router or coordinator skills, and do not run linchpin.sh route, mode, schedule, or brief — routing already happened and this brief is its result)'
   rule_scope='Scope rule: change only the files this PRD covers. Do not delete, move, or edit an unrelated file, do not bump an unrelated dependency, and do not bundle unrelated work into this lane. Something outside scope that looks wrong is a note in your report, not an edit. This rule bounds WHAT you change; it never forbids committing what you did change.'
   rule_gate='Gate rule: every negative control this PRD declares needs observed-red evidence before delivery. A control the PRD never declared is not invented here.'
   # Workers told only what to change left the result uncommitted in the working
@@ -1455,6 +1461,19 @@ preflight_model() {
   fi
   require_file "$cache_path"
   command -v jq >/dev/null 2>&1 || die 'jq is required for model preflight'
+  # Every `codex exec` child writes its own session state under CODEX_HOME
+  # before the model is ever contacted. When the manager itself runs under a
+  # sandbox that leaves CODEX_HOME read-only, the child dies with `failed to
+  # initialize in-process app-server client: Read-only file system` — and the
+  # run discovers it at the *reviewer*, after every lane has already been built
+  # and committed. That run ended "committed but review-gated" with no review at
+  # all. A directory write test costs nothing and moves the discovery here.
+  preflight_home=$(dirname -- "$cache_path")
+  preflight_probe="$preflight_home/.linchpin-preflight-write"
+  if ! (: > "$preflight_probe") 2>/dev/null; then
+    die "CODEX_HOME is not writable: $preflight_home — every codex exec worker and reviewer fails at app-server init before the model starts; run linchpin from a session that can write it, or set CODEX_HOME to a writable directory"
+  fi
+  rm -f "$preflight_probe"
   # Every role that will actually run gets checked, not just the worker. A
   # reviewer model missing from the cache fails at the first lane's review,
   # after the run has already spent its worker time.
@@ -1525,6 +1544,147 @@ workspace() {
   printf 'WORKSPACE-READY %s\n' "$workspace_repo/.linchpin"
 }
 
+lane_worktree() {
+  # Linchpin used to describe lane isolation and leave the mechanism to the
+  # manager. Managers filled the gap with whatever worktree helper the user
+  # happened to have installed. One of those helpers ran `git pull` in the
+  # source tree on the way to creating the worktree, left an unresolved merge
+  # in twenty modified files the user had not committed, and the run spent its
+  # first minutes on `git merge --abort` instead of on the PRD. Lane isolation
+  # is linchpin's job, so linchpin ships the command.
+  worktree_repo=''
+  worktree_slug=''
+  worktree_base=''
+  worktree_path=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --path) [ "$#" -ge 2 ] || die 'worktree --path needs a directory'; worktree_path="$2"; shift 2 ;;
+      --*) die "unknown worktree option: $1" ;;
+      *)
+        if [ -z "$worktree_repo" ]; then worktree_repo="$1"
+        elif [ -z "$worktree_slug" ]; then worktree_slug="$1"
+        elif [ -z "$worktree_base" ]; then worktree_base="$1"
+        else die "unexpected worktree argument: $1"
+        fi
+        shift ;;
+    esac
+  done
+  [ -n "$worktree_repo" ] && [ -n "$worktree_slug" ] && [ -n "$worktree_base" ] ||
+    die 'usage: linchpin.sh worktree REPO LANE_SLUG BASE_REF [--path DIR]'
+  printf '%s\n' "$worktree_slug" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' ||
+    die "lane slug is malformed: '$worktree_slug' (allowed: alphanumeric start, then A-Z a-z 0-9 . _ -)"
+  command -v git >/dev/null 2>&1 || die 'git is required to create a lane worktree'
+  [ -d "$worktree_repo" ] || die "worktree target is not a directory: $worktree_repo"
+  git -C "$worktree_repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+    die "worktree target is not a Git repository: $worktree_repo"
+
+  # Refuse to build a lane from inside another lane. A manager that had already
+  # moved into a worktree created the next lane relative to *that* directory and
+  # produced `.worktrees/<lane-a>/.worktrees/<lane-b>`, branched off lane A
+  # rather than off the base. Both nesting and lane-from-lane branching are
+  # forbidden by the coordinator; this is where they are actually prevented.
+  if [ "$(git -C "$worktree_repo" rev-parse --is-inside-work-tree 2>/dev/null)" = 'true' ] &&
+     [ "$(git -C "$worktree_repo" rev-parse --git-dir)" != "$(git -C "$worktree_repo" rev-parse --git-common-dir)" ]; then
+    printf 'WORKTREE-FAIL nested %s is itself a linked worktree; create lanes from the main worktree\n' "$worktree_repo" >&2
+    exit 1
+  fi
+
+  worktree_branch="linchpin/$worktree_slug"
+  if git -C "$worktree_repo" show-ref --verify --quiet "refs/heads/$worktree_branch"; then
+    printf 'WORKTREE-FAIL branch-exists %s already exists; resume it or pick another lane slug\n' "$worktree_branch" >&2
+    exit 1
+  fi
+
+  # Branch from the remote base after a fetch. A local base that sits ahead of
+  # its remote carries the user's unrelated committed work into every lane, and
+  # delivery then merges that work under a PR title that never mentions it.
+  # `git fetch` is safe in a dirty tree; `git pull` is not, and is never run.
+  worktree_resolved="$worktree_base"
+  if git -C "$worktree_repo" remote get-url origin >/dev/null 2>&1; then
+    git -C "$worktree_repo" fetch --quiet origin "$worktree_base" 2>/dev/null || true
+    if git -C "$worktree_repo" rev-parse --verify --quiet "origin/$worktree_base" >/dev/null; then
+      worktree_resolved="origin/$worktree_base"
+    fi
+  fi
+  if ! git -C "$worktree_repo" rev-parse --verify --quiet "$worktree_resolved" >/dev/null; then
+    printf 'WORKTREE-FAIL missing-base %s does not resolve in %s\n' "$worktree_resolved" "$worktree_repo" >&2
+    exit 1
+  fi
+  worktree_base_sha=$(git -C "$worktree_repo" rev-parse "$worktree_resolved")
+
+  [ -n "$worktree_path" ] || worktree_path="$worktree_repo/.worktrees/$worktree_slug"
+  if [ -e "$worktree_path" ]; then
+    printf 'WORKTREE-FAIL path-exists %s\n' "$worktree_path" >&2
+    exit 1
+  fi
+
+  # The failure text is the announcement the user reads, so it carries git's own
+  # reason rather than a summary of it. `schedule auto worktree-fail` is only
+  # honest when the attempt actually happened.
+  if ! worktree_error=$(git -C "$worktree_repo" worktree add -b "$worktree_branch" "$worktree_path" "$worktree_resolved" 2>&1); then
+    printf 'WORKTREE-FAIL add %s\n' "$(printf '%s' "$worktree_error" | tr '\n' ' ')" >&2
+    exit 1
+  fi
+  printf 'WORKTREE-READY path=%s branch=%s base=%s sha=%s\n' \
+    "$worktree_path" "$worktree_branch" "$worktree_resolved" "$worktree_base_sha"
+}
+
+lane_await() {
+  # A lane takes tens of minutes. Managers waited on them by polling a live
+  # subprocess every few seconds: one field batch spent 954 thirty-second polls
+  # and 739 one-second polls restating that lanes were still running. Polling
+  # once per lane per interval makes waiting cost turns in proportion to lane
+  # *duration*; this waits on a whole group in one call, so it costs turns in
+  # proportion to the number of groups.
+  await_interval=30
+  await_timeout=0
+  await_pidfiles=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --interval) [ "$#" -ge 2 ] || die 'await --interval needs seconds'; await_interval="$2"; shift 2 ;;
+      --timeout) [ "$#" -ge 2 ] || die 'await --timeout needs seconds'; await_timeout="$2"; shift 2 ;;
+      --*) die "unknown await option: $1" ;;
+      *) await_pidfiles="$await_pidfiles $1"; shift ;;
+    esac
+  done
+  [ -n "$await_pidfiles" ] || die 'usage: linchpin.sh await PIDFILE... [--interval SECONDS] [--timeout SECONDS]'
+  for await_arg in $await_interval $await_timeout; do
+    printf '%s\n' "$await_arg" | grep -Eq '^[0-9]+$' || die "await interval and timeout are whole seconds: $await_arg"
+  done
+  [ "$await_interval" -gt 0 ] || die 'await --interval must be greater than zero'
+  for await_file in $await_pidfiles; do
+    require_file "$await_file"
+  done
+
+  await_waited=0
+  while :; do
+    await_running=0
+    for await_file in $await_pidfiles; do
+      await_pid=$(tr -dc '0-9' < "$await_file")
+      [ -n "$await_pid" ] || continue
+      kill -0 "$await_pid" 2>/dev/null && await_running=$((await_running + 1))
+    done
+    [ "$await_running" -eq 0 ] && break
+    if [ "$await_timeout" -gt 0 ] && [ "$await_waited" -ge "$await_timeout" ]; then
+      # A timeout is not a delivery result. Say which lanes are still alive and
+      # leave them running: the manager inspects the real diff from here.
+      printf 'AWAIT-TIMEOUT running=%d waited=%ds\n' "$await_running" "$await_waited" >&2
+      exit 1
+    fi
+    sleep "$await_interval"
+    await_waited=$((await_waited + await_interval))
+  done
+
+  for await_file in $await_pidfiles; do
+    await_pid=$(tr -dc '0-9' < "$await_file")
+    await_status='exited'
+    [ -f "$await_file.exit" ] && await_status=$(tr -dc '0-9' < "$await_file.exit")
+    printf 'AWAIT-DONE lane=%s pid=%s exit=%s\n' \
+      "$(basename "$await_file" .pid)" "${await_pid:-unknown}" "$await_status"
+  done
+  printf 'AWAIT-COMPLETE lanes=%d waited=%ds\n' "$(printf '%s\n' $await_pidfiles | wc -l | tr -d ' ')" "$await_waited"
+}
+
 usage() {
   cat <<'USAGE'
 linchpin.sh COMMAND [ARGS]
@@ -1544,6 +1704,8 @@ linchpin.sh COMMAND [ARGS]
   gate PRD REPORT                                    check observed-red evidence
   config [REPO]                                      print resolved .linchpin.toml
   workspace [REPO]                                   make .linchpin/ and ignore run output
+  worktree REPO LANE_SLUG BASE_REF [--path DIR]      create one isolated lane worktree
+  await PIDFILE... [--interval S] [--timeout S]      block until a group's lanes exit
   preflight [MODELS_CACHE.json]                      check the worker model
   help                                               this text
 
@@ -1570,6 +1732,8 @@ case "$command_name" in
   help|--help|-h) usage; exit 0 ;;
   config) [ "$#" -le 1 ] || die 'usage: linchpin.sh config [repo]'; config_values "${1:-${LINCHPIN_CONFIG_DIR:-$PWD}}" ;;
   workspace) [ "$#" -le 1 ] || die 'usage: linchpin.sh workspace [repo]'; workspace "${1:-}" ;;
+  worktree) [ "$#" -ge 3 ] || die 'usage: linchpin.sh worktree REPO LANE_SLUG BASE_REF [--path DIR]'; lane_worktree "$@" ;;
+  await) [ "$#" -ge 1 ] || die 'usage: linchpin.sh await PIDFILE... [--interval SECONDS] [--timeout SECONDS]'; lane_await "$@" ;;
   route) [ "$#" -ge 1 ] || die 'usage: linchpin.sh route INTENT [SCORE] [PRD ...] [--config-dir DIR]'; route "$@" ;;
   mode) [ "$#" -ge 2 ] || die 'usage: linchpin.sh mode EXECUTION PRD...'; mode_selection "$@" ;;
   schedule) [ "$#" -ge 3 ] || die 'usage: linchpin.sh schedule EXECUTION WORKTREE_STATUS LANE...'; schedule "$@" ;;

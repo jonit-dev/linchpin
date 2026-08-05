@@ -62,6 +62,8 @@ Run these checks before branches or workers:
 
 - verify the target is a Git repository;
 - run `scripts/linchpin.sh preflight` against `$CODEX_HOME/models_cache.json`;
+  it resolves both role models and confirms `$CODEX_HOME` is writable, which is
+  what every worker and reviewer subprocess needs before its model starts;
 - inspect current status, default branch, remotes, and delivery capability;
 - parse every phase `Files (N)` list; a malformed list is an error, never an
   assumption of disjointness;
@@ -170,6 +172,17 @@ an unresumable run is not a run.
    then merges that work under a PR title that never mentions it. If local and
    remote have diverged, say so before the first lane starts; whose commits
    those are is the user's call, not a detail to resolve silently.
+
+   For a worktree lane, create it with
+   `scripts/linchpin.sh worktree <main-repo> <lane-slug> <base>`, always from
+   the repository's **main** worktree and never from inside another lane. It
+   fetches, resolves `origin/<base>`, refuses a nested or already-claimed lane,
+   and prints `WORKTREE-READY` or a `WORKTREE-FAIL <reason>` you pass straight
+   to `schedule auto`. Do not substitute a worktree helper from the user's
+   machine: one of those pulled the base branch inside the user's dirty source
+   tree on the way to creating the worktree and left an unresolved merge across
+   twenty uncommitted files. Lane isolation is Linchpin's to perform, and the
+   source tree the user is sitting in is never modified to create a lane.
 2. **Make the worktree able to run the gates before the worker starts.** A fresh
    worktree has source but no build state: no installed dependencies, and none
    of the repository's local tooling. Every lane that discovers this alone
@@ -181,7 +194,13 @@ an unresumable run is not a run.
    actually runnable there. Check the repository's own test configuration for
    path exclusions that would silently match your worktree directory and match
    zero tests; if one does, resolve the override once and put it in every brief
-   rather than letting each lane rediscover it.
+   rather than letting each lane rediscover it. The same gap breaks commits: a
+   repository whose commit hooks run out of `node_modules` rejects every commit
+   in a fresh worktree until dependencies are installed, so bootstrap before the
+   first commit rather than after it. If what you are committing is your own
+   manager housekeeping — a ledger, a plan file — recording it with hooks
+   skipped is acceptable and worth saying out loud; a lane commit is never
+   delivered on skipped hooks.
 3. Launch workers using only the Worker row in `references/runtime.md`. Pin the
    required effort and working directory in the subprocess invocation, and pass
    the generated brief file as the prompt. Do not inherit session defaults, do
@@ -200,13 +219,28 @@ an unresumable run is not a run.
 ### Awaiting a lane
 
 A lane takes minutes, and its progress prose is not evidence you will act on.
-Record the session id at launch and redirect worker output to a log. Then wait
-on process exit itself — block on the process, or sleep in one long interval
-sized to the lane, so that waiting costs turns in proportion to the number of
-lanes rather than to their duration. A keepalive poll every few seconds spends
-the whole run restating that a lane is still running, which is neither evidence
-nor progress. Process exit and the real diff are the only two signals worth a
-turn; announce a lane's status when it changes, not on a timer.
+Launch each worker **detached**, with its output redirected to a log and its
+process id written to `.linchpin/<lane>.pid`, so that no lane holds an
+interactive session open for you to babysit:
+
+```sh
+codex exec ... > .linchpin/<lane>.log 2>&1 &
+echo $! > .linchpin/<lane>.pid
+```
+
+Then wait on the whole group at once:
+
+```sh
+scripts/linchpin.sh await .linchpin/<lane-a>.pid .linchpin/<lane-b>.pid --interval 60
+```
+
+It blocks until every lane in the group has exited and prints one
+`AWAIT-DONE` row per lane. Waiting for a group in one call costs turns in
+proportion to the number of groups; polling each live subprocess on a short
+timer costs turns in proportion to lane duration, and runs that did it spent
+hundreds of turns restating that a lane was still running. Process exit and the
+real diff are the only two signals worth a turn; announce a lane's status when
+it changes, not on a timer.
 
 ### Ending the run
 
@@ -277,8 +311,17 @@ Then launch exactly one fresh reviewer per lane through this shape, with all
 role values resolved from the Reviewer row in `references/runtime.md`:
 
 ```text
-codex exec --model <Reviewer.Model> -c 'model_reasoning_effort="<Reviewer.Effort>"' --sandbox read-only -C <lane> <review>
+codex exec --model <Reviewer.Model> -c 'model_reasoning_effort="<Reviewer.Effort>"' --sandbox read-only -C <lane> "$(cat <review-file>)"
 ```
+
+Pass the file `review-brief --out` wrote. Do not interpolate the packet's text
+into the command line: it contains backticks, quoted commands, and table pipes,
+and a manager that hand-escaped one sent `codex` a mangled argument and read its
+`Reading additional input from stdin...` as a review. If the reviewer exits
+before the model starts, that is an environment failure, not a verdict — the
+usual cause is a `$CODEX_HOME` the process cannot write, which preflight already
+checks. Report it as an unresolved external gate and say the lane is unreviewed;
+never let a reviewer that could not start be recorded as a lane that passed.
 
 Record `review_used: true` before launch. The reviewer cannot edit. The manager
 closes findings after Luna repair; no second reviewer is started after repair.
