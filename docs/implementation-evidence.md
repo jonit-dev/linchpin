@@ -24,7 +24,8 @@ Phase 7 is explicitly optional and unbuilt.
 | 13 | runtime verifier | `.github/workflows/verify.yml:18`; `scripts/verify.sh:50` | no safety rail | `tests/luna-never-native.sh` reports the offending file and line |
 | 14 | Codex plugin manifest | `.codex-plugin/plugin.json:5` | live incumbent discovery | `tests/manifest-valid.sh` rejects an invented key |
 | 15 | `linchpin` router | `skills/linchpin/SKILL.md:13`; `.codex-plugin/plugin.json:7` | no narrow entry point | `tests/router-not-a-gate.sh` keeps direct skills usable |
-| 16 | goal-loop status driver | optional/unbuilt: no Phase 1-6 merge checkpoint exists in this local run | prose goal judging | no dangling reference; optional phase deliberately not started |
+| 16 | run-ledger writer and status reader | `skills/prd-swarm-coordinator/SKILL.md:161,428`; `scripts/linchpin.sh:1729,1888` | a ledger typed from memory and a prose "done" summary | `tests/run-ledger.sh` rejects a `DELIVERED` row whose commit sha does not resolve, and `status` exits non-zero while a lane is open |
+| 16a | goal loop armed on that status driver | optional/unbuilt: Phase 7 deliberately not started | prose goal judging | n/a — the status command exists, the loop that would consume it does not |
 
 ## Caller census commands
 
@@ -40,5 +41,6 @@ grep -n 'scripts/verify.sh' .github/workflows/verify.yml
 `sh tests/run-all.sh` records red results for marker removal, ledger omission,
 malformed file counts, forced parallelism, worktree failure, missing model
 capability, all-green gate evidence, tier escalation, native Luna references,
-stray pins, native task delegation, manifest drift, route drift, and duplicate
-incumbents. A green-only result is not recorded as a gate pass.
+stray pins, native task delegation, manifest drift, route drift, duplicate
+incumbents, and unverifiable run-ledger rows. A green-only result is not
+recorded as a gate pass.

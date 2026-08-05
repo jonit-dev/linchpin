@@ -1685,6 +1685,263 @@ lane_await() {
   printf 'AWAIT-COMPLETE lanes=%d waited=%ds\n' "$(printf '%s\n' $await_pidfiles | wc -l | tr -d ' ')" "$await_waited"
 }
 
+# Every other invariant in this plugin is enforced by a command: briefs are
+# checked, gates are checked, worktrees are created, models are preflighted. The
+# run ledger was the exception. The coordinator demands fifteen fields per lane,
+# calls a run without one unresumable, and then leaves a manager model to type
+# those fields from memory at the end of an eight-lane batch. That is exactly
+# where a row reading `DELIVERED` against a sha nobody created gets written —
+# a failure the skill names and had no way to catch. These two commands make the
+# ledger the artifact it was always described as: written by a helper that
+# refuses a claim it cannot verify, and read back by a command rather than
+# recalled.
+ledger_lane_valid() {
+  printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$'
+}
+
+ledger_block() {
+  # Every `- key: value` line of one lane's block, in file order. A block ends at
+  # the next heading of any kind, so prose a manager adds between lanes is never
+  # absorbed into the row above it.
+  awk -v target="$2" '
+    function trim(value) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      return value
+    }
+    /^## / {
+      current = ($0 ~ /^## Lane: /) ? trim(substr($0, 10)) : ""
+      next
+    }
+    current == target && /^- [a-z][a-z0-9_]*:/ {
+      entry = substr($0, 3)
+      split_at = index(entry, ":")
+      print substr(entry, 1, split_at - 1) "\t" trim(substr(entry, split_at + 1))
+    }
+  ' "$1"
+}
+
+ledger_value() {
+  # Empty output means absent: a value is never allowed to be empty, so the two
+  # cases cannot be confused by a caller.
+  awk -F '\t' -v key="$1" '$1 == key { value = $2 } END { print value }' "$2"
+}
+
+lane_record() {
+  lane_file=''
+  lane_id=''
+  lane_repo=''
+  lane_sets_seen=0
+  lane_tmp=$(mktemp -d "${TMPDIR:-/tmp}/linchpin-lane.XXXXXX")
+  trap 'rm -rf -- "$lane_tmp"' EXIT HUP INT TERM
+  : > "$lane_tmp/sets"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --set)
+        [ "$#" -ge 2 ] || die 'lane --set needs key=value'
+        case "$2" in
+          *=*) ;;
+          *) die "lane --set needs key=value: $2" ;;
+        esac
+        lane_key=${2%%=*}
+        lane_value=${2#*=}
+        printf '%s\n' "$lane_key" | grep -Eq '^[a-z][a-z0-9_]*$' ||
+          die "lane field name is not a lowercase identifier: $lane_key"
+        [ -n "$lane_value" ] || die "lane field has an empty value: $lane_key (write an explicit value such as none)"
+        case "$lane_value" in
+          *"$(printf '\t')"*) die "lane field value contains a tab: $lane_key" ;;
+        esac
+        [ "$(printf '%s' "$lane_value" | wc -l | tr -d ' ')" -eq 0 ] ||
+          die "lane field value spans more than one line: $lane_key"
+        printf '%s\t%s\n' "$lane_key" "$lane_value" >> "$lane_tmp/sets"
+        lane_sets_seen=$((lane_sets_seen + 1))
+        shift 2 ;;
+      --repo) [ "$#" -ge 2 ] || die 'lane --repo needs a directory'; lane_repo="$2"; shift 2 ;;
+      --*) die "unknown lane option: $1" ;;
+      *)
+        if [ -z "$lane_file" ]; then lane_file="$1"
+        elif [ -z "$lane_id" ]; then lane_id="$1"
+        else die "unexpected lane argument: $1"
+        fi
+        shift ;;
+    esac
+  done
+  [ -n "$lane_file" ] || die 'usage: linchpin.sh lane LEDGER LANE_ID --set key=value...'
+  [ -n "$lane_id" ] || die 'usage: linchpin.sh lane LEDGER LANE_ID --set key=value...'
+  ledger_lane_valid "$lane_id" || die "lane id is malformed: $lane_id"
+  [ "$lane_sets_seen" -gt 0 ] || die 'lane needs at least one --set key=value'
+  # The ledger lives at <repo>/.linchpin/run-<timestamp>.md, so the repository
+  # that holds the lane's commit is two levels up unless the caller says otherwise.
+  [ -n "$lane_repo" ] || lane_repo=$(CDPATH= cd -- "$(dirname -- "$(dirname -- "$lane_file")")" && pwd)
+
+  if [ -e "$lane_file" ]; then
+    [ -f "$lane_file" ] || die "run ledger is not a file: $lane_file"
+    ledger_block "$lane_file" "$lane_id" > "$lane_tmp/existing"
+  else
+    lane_dir=$(dirname -- "$lane_file")
+    [ -d "$lane_dir" ] || die "run ledger directory does not exist: $lane_dir (run linchpin.sh workspace first)"
+    printf '%s\n' '# Linchpin run ledger' '' > "$lane_file"
+    : > "$lane_tmp/existing"
+  fi
+
+  # Merge: an existing field keeps its position and takes the new value, a new
+  # field is appended. Rewriting the row from the --set list alone would silently
+  # drop every field an earlier call recorded.
+  : > "$lane_tmp/merged"
+  while IFS="$(printf '\t')" read -r lane_key lane_value; do
+    [ -n "$lane_key" ] || continue
+    lane_override=$(ledger_value "$lane_key" "$lane_tmp/sets")
+    [ -z "$lane_override" ] || lane_value="$lane_override"
+    printf '%s\t%s\n' "$lane_key" "$lane_value" >> "$lane_tmp/merged"
+  done < "$lane_tmp/existing"
+  while IFS="$(printf '\t')" read -r lane_key lane_value; do
+    [ -n "$lane_key" ] || continue
+    [ -z "$(ledger_value "$lane_key" "$lane_tmp/existing")" ] || continue
+    [ -z "$(ledger_value "$lane_key" "$lane_tmp/merged")" ] || continue
+    # Read the value back rather than trusting this line: a field set twice in
+    # one call must land on the same last-wins value an existing field would.
+    printf '%s\t%s\n' "$lane_key" "$(ledger_value "$lane_key" "$lane_tmp/sets")" >> "$lane_tmp/merged"
+  done < "$lane_tmp/sets"
+
+  lane_state=$(ledger_value state "$lane_tmp/merged")
+  [ -n "$lane_state" ] || die "lane row has no state: $lane_id (--set state=PENDING|RUNNING|PARTIAL|BLOCKED|'DELIVERED(pr)'|'DELIVERED(branch)')"
+  case "$lane_state" in
+    MERGED|merged)
+      # The coordinator forbids this word as a product state on purpose: it bakes
+      # pr delivery into the ledger's vocabulary and makes branch delivery a
+      # redesign instead of a config value.
+      die "MERGED is not a lane state; use DELIVERED(pr) or DELIVERED(branch)" ;;
+    PENDING|RUNNING|PARTIAL|BLOCKED|'DELIVERED(pr)'|'DELIVERED(branch)') ;;
+    *) die "unknown lane state: $lane_state (PENDING, RUNNING, PARTIAL, BLOCKED, DELIVERED(pr), DELIVERED(branch))" ;;
+  esac
+
+  lane_commit=$(ledger_value commit "$lane_tmp/merged")
+  if [ -n "$lane_commit" ]; then
+    # A recorded sha the worker never created is the false ledger row the
+    # coordinator names and could not catch. Resolving it costs one git call.
+    printf '%s\n' "$lane_commit" | grep -Eq '^[0-9a-f]{7,40}$' ||
+      die "lane commit is not a git object id: $lane_commit"
+    command -v git >/dev/null 2>&1 || die 'git is required to verify a recorded lane commit'
+    git -C "$lane_repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+      die "lane commit cannot be verified: $lane_repo is not a Git repository (pass --repo)"
+    git -C "$lane_repo" cat-file -e "$lane_commit^{commit}" 2>/dev/null ||
+      die "recorded lane commit does not exist in $lane_repo: $lane_commit"
+  fi
+
+  case "$lane_state" in
+    'DELIVERED(pr)'|'DELIVERED(branch)')
+      for lane_required in prd branch commit gates review; do
+        [ -n "$(ledger_value "$lane_required" "$lane_tmp/merged")" ] ||
+          die "a delivered lane needs $lane_required: $lane_id"
+      done
+      lane_gates=$(ledger_value gates "$lane_tmp/merged")
+      # Either the evidence file exists or the PRD declared no controls, which is
+      # what `gate` reports. An asserted evidence path that is not on disk is the
+      # same claim-without-evidence the gate rule exists to reject.
+      if [ "$lane_gates" != 'NOT-DECLARED' ] && [ ! -f "$lane_gates" ]; then
+        case "$lane_gates" in
+          /*) die "gate evidence file does not exist: $lane_gates" ;;
+          *) [ -f "$lane_repo/$lane_gates" ] || die "gate evidence file does not exist: $lane_gates (relative to $lane_repo)" ;;
+        esac
+      fi
+      ;;
+    BLOCKED)
+      for lane_required in reason resume; do
+        [ -n "$(ledger_value "$lane_required" "$lane_tmp/merged")" ] ||
+          die "a blocked lane needs $lane_required: $lane_id"
+      done
+      ;;
+  esac
+
+  {
+    printf '## Lane: %s\n' "$lane_id"
+    while IFS="$(printf '\t')" read -r lane_key lane_value; do
+      [ -n "$lane_key" ] || continue
+      printf '%s\n' "- $lane_key: $lane_value"
+    done < "$lane_tmp/merged"
+  } > "$lane_tmp/block"
+
+  awk -v target="$lane_id" -v blockfile="$lane_tmp/block" '
+    function trim(value) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      return value
+    }
+    # The trailing blank line is emitted here, not by the caller: an update
+    # consumes the blank line that followed the old block, and without this every
+    # re-record would jam the next lane heading against the row above it.
+    function emit(   i) { for (i = 1; i <= block_lines; i++) print block[i]; print "" }
+    BEGIN { while ((getline block_line < blockfile) > 0) block[++block_lines] = block_line }
+    /^## / {
+      if ($0 ~ /^## Lane: / && trim(substr($0, 10)) == target) {
+        emit(); replaced = 1; inside = 1; next
+      }
+      inside = 0; print; next
+    }
+    inside { next }
+    { print }
+    END { if (!replaced) emit() }
+  ' "$lane_file" > "$lane_tmp/ledger"
+  cat "$lane_tmp/ledger" > "$lane_file"
+  printf 'LANE-RECORDED %s state=%s fields=%s\n' \
+    "$lane_id" "$lane_state" "$(awk 'NF' "$lane_tmp/merged" | wc -l | tr -d ' ')"
+}
+
+run_status() {
+  status_file="${1:-}"
+  [ -n "$status_file" ] || die 'usage: linchpin.sh status LEDGER'
+  require_file "$status_file"
+  status_lines=$(awk '
+    function trim(value) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      return value
+    }
+    function flush(   line, i, key) {
+      if (lane == "") return
+      line = (value["state"] == "" ? "UNRECORDED" : value["state"]) " lane=" lane
+      for (i = 1; i <= reported; i++) {
+        key = report[i]
+        if (value[key] != "") line = line " " key "=" value[key]
+      }
+      print line
+      lane = ""
+      split("", value)
+    }
+    BEGIN {
+      reported = split("prd branch commit gates review reason resume", report, " ")
+    }
+    /^## / {
+      flush()
+      if ($0 ~ /^## Lane: /) lane = trim(substr($0, 10))
+      next
+    }
+    lane != "" && /^- [a-z][a-z0-9_]*:/ {
+      entry = substr($0, 3)
+      split_at = index(entry, ":")
+      value[substr(entry, 1, split_at - 1)] = trim(substr(entry, split_at + 1))
+    }
+    END { flush() }
+  ' "$status_file")
+  [ -n "$status_lines" ] || die "run ledger has no lane rows: $status_file"
+  printf '%s\n' "$status_lines"
+  status_count() {
+    printf '%s\n' "$status_lines" | grep -c "$1" || true
+  }
+  status_delivered=$(status_count '^DELIVERED(')
+  status_partial=$(status_count '^PARTIAL ')
+  status_blocked=$(status_count '^BLOCKED ')
+  status_pending=$(status_count '^PENDING ')
+  status_running=$(status_count '^RUNNING ')
+  status_unrecorded=$(status_count '^UNRECORDED ')
+  status_open=$((status_partial + status_pending + status_running + status_unrecorded))
+  printf 'RUN-STATUS delivered=%s partial=%s blocked=%s pending=%s running=%s unrecorded=%s\n' \
+    "$status_delivered" "$status_partial" "$status_blocked" "$status_pending" \
+    "$status_running" "$status_unrecorded"
+  # Three outcomes, not two. A goal loop needs "keep going" and "stop, a human is
+  # required" to be different answers, and a summary that says done while a lane
+  # is still PARTIAL is the prose claim this command replaces.
+  [ "$status_open" -eq 0 ] || exit 1
+  [ "$status_blocked" -eq 0 ] || exit 2
+}
+
 usage() {
   cat <<'USAGE'
 linchpin.sh COMMAND [ARGS]
@@ -1704,6 +1961,12 @@ linchpin.sh COMMAND [ARGS]
   gate PRD REPORT                                    check observed-red evidence
   config [REPO]                                      print resolved .linchpin.toml
   workspace [REPO]                                   make .linchpin/ and ignore run output
+  lane LEDGER LANE_ID --set key=value... [--repo DIR] record one run-ledger row
+        state: PENDING | RUNNING | PARTIAL | BLOCKED | DELIVERED(pr) | DELIVERED(branch)
+        a recorded commit must resolve in the repository; DELIVERED needs
+        prd, branch, commit, gates, review; BLOCKED needs reason, resume
+  status LEDGER                                      read the ledger back
+        exit 0 every lane delivered; 1 a lane is still open; 2 only blocked lanes remain
   worktree REPO LANE_SLUG BASE_REF [--path DIR]      create one isolated lane worktree
   await PIDFILE... [--interval S] [--timeout S]      block until a group's lanes exit
   preflight [MODELS_CACHE.json]                      check the worker model
@@ -1732,6 +1995,8 @@ case "$command_name" in
   help|--help|-h) usage; exit 0 ;;
   config) [ "$#" -le 1 ] || die 'usage: linchpin.sh config [repo]'; config_values "${1:-${LINCHPIN_CONFIG_DIR:-$PWD}}" ;;
   workspace) [ "$#" -le 1 ] || die 'usage: linchpin.sh workspace [repo]'; workspace "${1:-}" ;;
+  lane) [ "$#" -ge 3 ] || die 'usage: linchpin.sh lane LEDGER LANE_ID --set key=value... [--repo DIR]'; lane_record "$@" ;;
+  status) [ "$#" -eq 1 ] || die 'usage: linchpin.sh status LEDGER'; run_status "$1" ;;
   worktree) [ "$#" -ge 3 ] || die 'usage: linchpin.sh worktree REPO LANE_SLUG BASE_REF [--path DIR]'; lane_worktree "$@" ;;
   await) [ "$#" -ge 1 ] || die 'usage: linchpin.sh await PIDFILE... [--interval SECONDS] [--timeout SECONDS]'; lane_await "$@" ;;
   route) [ "$#" -ge 1 ] || die 'usage: linchpin.sh route INTENT [SCORE] [PRD ...] [--config-dir DIR]'; route "$@" ;;

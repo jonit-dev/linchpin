@@ -3,7 +3,7 @@
 [![verify](https://github.com/jonit-dev/linchpin/actions/workflows/verify.yml/badge.svg)](https://github.com/jonit-dev/linchpin/actions/workflows/verify.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![codex plugin](https://img.shields.io/badge/codex-plugin-black.svg)](https://developers.openai.com/codex/)
-[![version](https://img.shields.io/badge/version-0.5.0-informational.svg)](.codex-plugin/plugin.json)
+[![version](https://img.shields.io/badge/version-0.6.0-informational.svg)](.codex-plugin/plugin.json)
 
 A Codex plugin that takes your PRDs and builds them.
 
@@ -157,6 +157,31 @@ Keep `.linchpin/` to resume or audit a run, delete it when you are done.
 Worktrees and merged lane branches are cleaned up at the end of the run. A lane
 that finished `PARTIAL` or `BLOCKED` keeps its worktree and branch on purpose;
 the final report names each one and the command that resumes it.
+
+## Checking what a run actually delivered
+
+The run ledger in `.linchpin/` is not prose the manager typed at the end. Every
+row is written through `scripts/linchpin.sh lane`, which refuses a state it does
+not recognize, a `DELIVERED` row missing its commit, gate evidence, or review,
+and — the one that matters — a commit sha that does not resolve in your
+repository. A lane cannot be recorded as shipped against a commit nobody made.
+
+Read it back with a command instead of trusting a summary:
+
+```sh
+sh scripts/linchpin.sh status .linchpin/run-1738000000.md
+```
+
+```text
+DELIVERED(pr) lane=lane-1 prd=docs/PRDs/PRD-007.md branch=linchpin/lane-1 commit=a1b2c3d gates=.linchpin/gates-1.md review=approve
+PARTIAL lane=lane-2 prd=docs/PRDs/PRD-008.md branch=linchpin/lane-2
+RUN-STATUS delivered=1 partial=1 blocked=0 pending=0 running=0 unrecorded=0
+```
+
+It exits `0` only when every lane is delivered, `1` while any lane is still
+open, and `2` when the only unfinished lanes are blocked. That makes "is this
+run done?" a question with an exit code rather than an opinion, which is what
+you want when the answer arrives after you walked away.
 
 ## Runtime
 

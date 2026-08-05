@@ -155,11 +155,29 @@ say so; do not do it unasked.
 
 Keep a run ledger at `.linchpin/run-<timestamp>.md` in the target repository,
 written before the first worker starts and updated as each lane changes state.
-For every lane record the PRD, slug, baseline, branch, worktree or shared-tree
-mode, file set, overlap group, dependencies, process id, subprocess session id,
-brief path, verification commands, review state, repair rounds, delivery mode,
-and terminal evidence. A run with no ledger file on disk is not resumable, and
-an unresumable run is not a run.
+Write every row with the helper, never by hand:
+
+```sh
+scripts/linchpin.sh lane .linchpin/run-<timestamp>.md <lane-id> \
+  --set state=RUNNING --set prd=<path> --set branch=<branch> --set pid=<pid>
+```
+
+Each call upserts that lane's row and keeps the fields earlier calls wrote, so
+record what you know when you know it. For every lane record the PRD, slug,
+baseline, branch, worktree or shared-tree mode, file set, overlap group,
+dependencies, process id, subprocess session id, brief path, verification
+commands, review state, repair rounds, delivery mode, and terminal evidence.
+
+`lane` refuses a row it cannot verify: an unknown state, `MERGED` as a product
+state, a `commit` sha that does not resolve in the repository, a
+`DELIVERED(...)` row missing its prd, branch, commit, gates, or review, a
+`gates` path that is not on disk, or a `BLOCKED` row with no `reason` and
+`resume`. That refusal is the point — a lane recorded as committed whose sha the
+worker never created is the false ledger row this run exists to make impossible,
+and it is not a claim you can talk your way past. Fix the row or fix the lane.
+
+A run with no ledger file on disk is not resumable, and an unresumable run is
+not a run.
 
 1. **Every lane gets its own branch**, sequential ones included:
    `git switch -c linchpin/<lane-slug>` from the same detected base branch.
@@ -403,6 +421,18 @@ Confirm the diff contains only the files the PRD's scope covers. An unrelated
 deletion, an unrelated dependency bump, or an unrelated doc edit that arrived
 inside a lane commit is a finding, not a bonus: name it, and get the worker's
 own commit narrowed before delivery.
+
+Read the ledger back rather than recalling it:
+
+```sh
+scripts/linchpin.sh status .linchpin/run-<timestamp>.md
+```
+
+It prints one line per lane and exits `0` only when every lane is
+`DELIVERED(...)`, `1` while any lane is still open, and `2` when the only
+unfinished lanes are `BLOCKED`. Summarizing eight lanes from memory at the end
+of a long batch is where a run starts reporting work it did not do; the command
+is the answer, and its exit code is the honest one.
 
 The final report maps every PRD criterion and every ledger row to a command,
 file:line, or captured result. It names observed-red failures, unresolved

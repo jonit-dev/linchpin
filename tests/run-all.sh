@@ -11,6 +11,7 @@ brief-requires-commit.sh
 no-lane-recursion.sh
 review-brief-carries-gates.sh
 workspace-ignored.sh
+run-ledger.sh
 lane-worktree-isolation.sh
 await-group-not-poll.sh
 files-list-parseable.sh
