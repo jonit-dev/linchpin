@@ -8,16 +8,25 @@ fixture="$fixture_dir/conforming-prd.md"
 gates="$tmp_dir/gate-evidence.md"
 cp "$fixture_dir/gate-all-green.md" "$gates"
 
+# The round cap lives in the ledger, so a review brief needs one. Rounds
+# themselves are covered by one-review-per-lane.sh; here it is only the row the
+# other assertions need to exist.
+repo="$tmp_dir/gates-repo"
+mkdir -p "$repo/.linchpin"
+ledger="$repo/.linchpin/run-test.md"
+sh "$repo_root/scripts/linchpin.sh" lane "$ledger" lane-1 \
+  --set state=RUNNING --set prd="$fixture" --repo "$repo" >/dev/null
+
 expect_failure 'review brief without gate evidence' \
-  sh "$repo_root/scripts/linchpin.sh" review-brief "$fixture" lane-1 --commit abc1234
+  sh "$repo_root/scripts/linchpin.sh" review-brief "$fixture" lane-1 --commit abc1234 --ledger "$ledger"
 expect_failure 'review brief without a lane commit' \
-  sh "$repo_root/scripts/linchpin.sh" review-brief "$fixture" lane-1 --gates "$gates"
+  sh "$repo_root/scripts/linchpin.sh" review-brief "$fixture" lane-1 --gates "$gates" --ledger "$ledger"
 expect_failure 'review brief with a malformed lane identity' \
-  sh "$repo_root/scripts/linchpin.sh" review-brief "$fixture" 'bad lane' --gates "$gates" --commit abc1234
+  sh "$repo_root/scripts/linchpin.sh" review-brief "$fixture" 'bad lane' --gates "$gates" --commit abc1234 --ledger "$ledger"
 
 review_file="$tmp_dir/review.md"
 written=$(sh "$repo_root/scripts/linchpin.sh" review-brief "$fixture" lane-1 \
-  --gates "$gates" --commit abc1234 --out "$review_file")
+  --gates "$gates" --commit abc1234 --ledger "$ledger" --out "$review_file")
 assert_contains "$written" 'REVIEW-BRIEF-WRITTEN'
 
 review_text=$(cat "$review_file")

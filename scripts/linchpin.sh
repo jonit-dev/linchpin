@@ -847,18 +847,34 @@ brief_emit() {
   fi
 }
 
+# One review per lane, and at most one more if the manager spends it on purpose.
+# Until now that was prose in the coordinator and nothing else. A run that broke
+# it launched seven reviewers at a single PRD across nine and a half hours: each
+# repair exposed a fresh defect, each fresh defect justified one more round, and
+# the files left on disk were named review4, review5, review-final, review-final2,
+# review-final3. The ledger recorded `repair_rounds: 1` throughout, so the run
+# read from the outside as one review that had not come back yet. A rule that
+# only a well-behaved manager obeys is not a rule; the count lives in the ledger
+# and the cap is enforced at the one command that can start a reviewer.
+review_round_cap=2
+
 review_brief() {
   prd=''
   lane_id=''
   commit_sha=''
   gates_file=''
   brief_out=''
+  ledger_file=''
+  round_requested=''
   positional_count=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --gates) [ "$#" -ge 2 ] || die 'review-brief --gates needs a path'; gates_file="$2"; shift 2 ;;
       --commit) [ "$#" -ge 2 ] || die 'review-brief --commit needs a sha'; commit_sha="$2"; shift 2 ;;
       --out) [ "$#" -ge 2 ] || die 'review-brief --out needs a path'; brief_out="$2"; shift 2 ;;
+      --ledger) [ "$#" -ge 2 ] || die 'review-brief --ledger needs a path'; ledger_file="$2"; shift 2 ;;
+      --ledger=*) ledger_file="${1#--ledger=}"; shift ;;
+      --round) [ "$#" -ge 2 ] || die 'review-brief --round needs a number'; round_requested="$2"; shift 2 ;;
       *)
         positional_count=$((positional_count + 1))
         case "$positional_count" in
@@ -870,7 +886,7 @@ review_brief() {
         ;;
     esac
   done
-  [ -n "$prd" ] || die 'usage: linchpin.sh review-brief PRD LANE_ID --gates PATH --commit SHA [--out PATH]'
+  [ -n "$prd" ] || die 'usage: linchpin.sh review-brief PRD LANE_ID --gates PATH --commit SHA --ledger PATH [--round N] [--out PATH]'
   [ -n "$lane_id" ] || die "lane identity is empty for $prd; pass LANE_ID as the second argument"
   printf '%s\n' "$lane_id" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$' ||
     die "lane identity is malformed: '$lane_id' (allowed: alphanumeric start, then A-Z a-z 0-9 . _ / -)"
@@ -886,9 +902,38 @@ review_brief() {
   [ -n "$commit_sha" ] ||
     die 'review-brief requires --commit SHA: an uncommitted lane is PARTIAL, not reviewable — get the worker commit first'
   require_file "$prd"
+
+  # The round cap and the ledger row are the same fact. A reviewer launched
+  # without the ledger is the review that goes unrecorded, and an unrecorded
+  # review is the one there is always room for another of.
+  [ -n "$ledger_file" ] ||
+    die 'review-brief requires --ledger PATH: the review count lives in the run ledger, and a review the ledger never saw is the one that repeats'
+  require_file "$ledger_file"
+  review_tmp=$(mktemp -d "${TMPDIR:-/tmp}/linchpin-review.XXXXXX")
+  trap 'rm -rf -- "$review_tmp"' EXIT HUP INT TERM
+  ledger_block "$ledger_file" "$lane_id" > "$review_tmp/row"
+  [ -s "$review_tmp/row" ] ||
+    die "run ledger has no row for lane $lane_id: $ledger_file (record the lane with linchpin.sh lane before you review it)"
+  round_recorded=$(ledger_value review_rounds "$review_tmp/row")
+  [ -n "$round_recorded" ] || round_recorded=0
+  printf '%s\n' "$round_recorded" | grep -Eq '^[0-9]+$' ||
+    die "ledger review_rounds is not a number for lane $lane_id: $round_recorded"
+  round_next=$((round_recorded + 1))
+  if [ "$round_next" -gt "$review_round_cap" ]; then
+    die "review round $round_next refused: lane $lane_id has already had $round_recorded reviews and the cap is $review_round_cap. A defect that survives $review_round_cap reviews is a specification problem, not a repair problem — record the lane BLOCKED with its reason and resume command, or narrow the PRD and start a new lane. Another round finds another defect; that is what the last $round_recorded did."
+  fi
+  if [ "$round_next" -gt 1 ] && [ "$round_requested" != "$round_next" ]; then
+    die "lane $lane_id already has $round_recorded review(s) recorded, so a further one is not automatic: pass --round $round_next to say you are deliberately spending the last review on this lane"
+  fi
+  # Record before emitting. A brief that exists against a count that was never
+  # incremented is the same unbounded loop with one extra step in it.
+  ( lane_record "$ledger_file" "$lane_id" \
+      --set review_rounds="$round_next" --set review_used=true >/dev/null ) ||
+    die "review-brief could not record round $round_next in $ledger_file: fix the lane row first"
+
   if [ -n "$brief_out" ]; then
     review_brief_emit "$prd" "$lane_id" "$commit_sha" "$gates_file" > "$brief_out"
-    printf 'REVIEW-BRIEF-WRITTEN %s\n' "$brief_out"
+    printf 'REVIEW-BRIEF-WRITTEN %s round=%s/%s\n' "$brief_out" "$round_next" "$review_round_cap"
     return
   fi
   review_brief_emit "$prd" "$lane_id" "$commit_sha" "$gates_file"
@@ -1896,6 +1941,20 @@ lane_record() {
     *) die "unknown lane state: $lane_state (PENDING, RUNNING, PARTIAL, BLOCKED, DELIVERED(pr), DELIVERED(branch))" ;;
   esac
 
+  # PARTIAL is what `status` counts as "still open", so a lane left there after
+  # its last review gives a manager reading exit codes a standing reason to start
+  # one more round. That is the loop the review cap ends, and this is the other
+  # half of it: once the reviews are spent the lane is delivered on its evidence
+  # or blocked on a named reason someone can act on. The call that bumps the
+  # counter is exempt, or the last permitted review could never be recorded.
+  lane_review_rounds=$(ledger_value review_rounds "$lane_tmp/merged")
+  if [ "$lane_state" = PARTIAL ] &&
+     [ -z "$(ledger_value review_rounds "$lane_tmp/sets")" ] &&
+     printf '%s\n' "$lane_review_rounds" | grep -Eq '^[0-9]+$' &&
+     [ "$lane_review_rounds" -ge "$review_round_cap" ]; then
+    die "lane $lane_id has spent its $review_round_cap reviews and cannot stay PARTIAL: record BLOCKED with reason and resume, or DELIVERED with its evidence. PARTIAL after the last review is the state a run repeats forever."
+  fi
+
   lane_commit=$(ledger_value commit "$lane_tmp/merged")
   if [ -n "$lane_commit" ]; then
     # A recorded sha the worker never created is the false ledger row the
@@ -2035,7 +2094,8 @@ linchpin.sh COMMAND [ARGS]
         [--out PATH] [--config-dir DIR]
   brief-check PRD BRIEF [--config-dir DIR]           verify a brief against its PRD
   review-brief PRD LANE_ID --gates PATH --commit SHA emit the read-only review brief
-        [--out PATH]
+        --ledger PATH [--round N] [--out PATH]
+        counts the round in the ledger; at most 2 per lane, the 2nd only with --round 2
   files PRD                                          print the parsed Files (N) list
   mode EXECUTION PRD... [--config-dir DIR]           group lanes by file collision
   schedule EXECUTION STATUS LANE... [--config-dir DIR]
@@ -2066,7 +2126,7 @@ case "$command_name" in
   migrate) [ "$#" -ge 1 ] || die 'usage: linchpin.sh migrate PRD [--out PATH] [--force]'; migrate "$@" ;;
   brief) [ "$#" -ge 1 ] || die 'usage: linchpin.sh brief PRD [LANE_ID LANE_MODE DELIVERY_MODE] [--config-dir DIR]'; brief "$@" ;;
   brief-check) [ "$#" -ge 2 ] || die 'usage: linchpin.sh brief-check PRD BRIEF [--config-dir DIR]'; brief_check "$@" ;;
-  review-brief) [ "$#" -ge 1 ] || die 'usage: linchpin.sh review-brief PRD LANE_ID --gates PATH --commit SHA [--out PATH]'; review_brief "$@" ;;
+  review-brief) [ "$#" -ge 1 ] || die 'usage: linchpin.sh review-brief PRD LANE_ID --gates PATH --commit SHA --ledger PATH [--round N] [--out PATH]'; review_brief "$@" ;;
   files)
     [ "$#" -eq 1 ] || die 'usage: linchpin.sh files PRD'
     if ! files_list "$1"; then

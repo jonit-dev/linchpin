@@ -167,6 +167,8 @@ record what you know when you know it. For every lane record the PRD, slug,
 baseline, branch, worktree or shared-tree mode, file set, overlap group,
 dependencies, process id, subprocess session id, brief path, verification
 commands, review state, repair rounds, delivery mode, and terminal evidence.
+`review_rounds` is the exception: `review-brief` writes it, and a lane that has
+spent its rounds can no longer be recorded `PARTIAL`.
 
 `lane` refuses a row it cannot verify: an unknown state, `MERGED` as a product
 state, a `commit` sha that does not resolve in the repository, a
@@ -335,11 +337,34 @@ rejection that says nothing about the code:
    repository's suites. Run them in a writable tree and produce the Gate
    Evidence table before the reviewer starts.
 
-Generate the review brief with the helper; it refuses to emit without both:
+Generate the review brief with the helper; it refuses to emit without both, and
+it counts the round in the ledger:
 
 ```sh
-scripts/linchpin.sh review-brief <prd> <lane-id> --gates <gate-evidence.md> --commit <sha> --out <review>
+scripts/linchpin.sh review-brief <prd> <lane-id> --gates <gate-evidence.md> --commit <sha> \
+  --ledger .linchpin/run-<timestamp>.md --out <review>
 ```
+
+`--ledger` is required and the lane's row must already exist, because the round
+count is a ledger field and a review the ledger never saw is the one that
+repeats. The helper writes `review_rounds` and `review_used` itself; do not set
+them by hand.
+
+**Two reviews per lane is the hard ceiling, and the second is not automatic.**
+`review-brief` emits round 1 on its own and refuses round 2 unless you pass
+`--round 2`, which is you spending the lane's last review deliberately. It
+refuses round 3 outright. A defect that survives two reviews is a specification
+problem, not a repair problem: the run that discovered this launched seven
+reviewers at one PRD over nine and a half hours, and every round found real but
+*different* defects, because each repair moved the code somewhere the previous
+review had not read. That converges slowly and lands never.
+
+When the reviews are spent and the lane is still not right, the lane is
+`BLOCKED` with a named reason and a resume command, or `DELIVERED` on the
+evidence it does have. It is not `PARTIAL`: `status` counts `PARTIAL` as still
+open, which reads as a standing instruction to run one more round, and `lane`
+now refuses that row. Narrowing the PRD and starting a fresh lane is a better
+use of the next hour than a third review of this one.
 
 Then launch exactly one fresh reviewer per lane through this shape, with all
 role values resolved from the Reviewer row in `references/runtime.md`:
@@ -357,8 +382,9 @@ usual cause is a `$CODEX_HOME` the process cannot write, which preflight already
 checks. Report it as an unresolved external gate and say the lane is unreviewed;
 never let a reviewer that could not start be recorded as a lane that passed.
 
-Record `review_used: true` before launch. The reviewer cannot edit. The manager
-closes findings after Luna repair; no second reviewer is started after repair.
+The reviewer cannot edit. The manager closes findings after Luna repair rather
+than reflexively re-reviewing; round 2 exists for the case where the repair
+changed enough that nobody has read the result, not as the default next step.
 
 Every finding is labelled `DEFECT` or `EVIDENCE-GAP`. Only a `DEFECT` blocks
 delivery. An `EVIDENCE-GAP` is recorded in the ledger and delivered past — a

@@ -10,6 +10,7 @@ brief-contains-ledger.sh
 brief-requires-commit.sh
 no-lane-recursion.sh
 review-brief-carries-gates.sh
+one-review-per-lane.sh
 workspace-ignored.sh
 run-ledger.sh
 lane-worktree-isolation.sh
