@@ -237,14 +237,30 @@ not a run.
 ### Awaiting a lane
 
 A lane takes minutes, and its progress prose is not evidence you will act on.
-Launch each worker **detached**, with its output redirected to a log and its
-process id written to `.linchpin/<lane>.pid`, so that no lane holds an
+Launch each worker **detached**, with the helper, so that no lane holds an
 interactive session open for you to babysit:
 
 ```sh
-codex exec ... > .linchpin/<lane>.log 2>&1 &
-echo $! > .linchpin/<lane>.pid
+scripts/linchpin.sh launch --pid .linchpin/<lane>.pid --log .linchpin/<lane>.log \
+  -- codex exec --model <Worker.Model> -c 'model_reasoning_effort="<Worker.Effort>"' \
+     -C <lane> "$(cat <brief-file>)"
 ```
+
+Do not hand-write `... > log 2>&1 & echo $! > pid` instead. A background process
+started that way inside a tool call is reaped with that call's process group the
+moment the call returns: the run that did it got a plausible pid, a zero-byte
+log, and an `AWAIT-DONE` after waiting zero seconds, which reads exactly like a
+lane that finished. `launch` puts the lane in its own session, records the exit
+code where `await` reads it, and prints `LAUNCH-FAIL died-immediately` with the
+log tail if the lane is already gone a few seconds later. Treat that as a launch
+failure to diagnose, never as a lane result.
+
+If detaching genuinely cannot work in your environment, running the worker in
+the foreground is the fallback, and it has one rule: **do not stream it.** A
+manager that fell back to a foreground worker and read its output on a 30-second
+keepalive spent roughly six hundred turns on one lane. Check at intervals of
+several minutes, ask for the smallest output the check needs, and say so in the
+ledger.
 
 Then wait on the whole group at once:
 

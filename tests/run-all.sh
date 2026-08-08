@@ -13,6 +13,7 @@ review-brief-carries-gates.sh
 workspace-ignored.sh
 run-ledger.sh
 lane-worktree-isolation.sh
+launch-detaches-lane.sh
 await-group-not-poll.sh
 files-list-parseable.sh
 single-is-swarm-of-one.sh

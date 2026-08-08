@@ -1629,6 +1629,88 @@ lane_worktree() {
     "$worktree_path" "$worktree_branch" "$worktree_resolved" "$worktree_base_sha"
 }
 
+lane_launch() {
+  # The coordinator told the manager to detach a worker by hand:
+  # `codex exec ... > log 2>&1 & echo $! > pid`. In a real run that line
+  # launched, reported a pid, and the process was dead two seconds later with a
+  # zero-byte log: the agent tool call that ran it takes its whole process group
+  # down when the call returns. `await` then printed `AWAIT-DONE exit=exited`
+  # after waiting 0s, which reads exactly like a lane that finished. The manager
+  # retried with `nohup`, lost that one the same way, gave up on detaching, ran
+  # the worker in the foreground, and spent the next hour polling it — 600 turns
+  # of keepalive for one lane. Detaching is a mechanism, so linchpin ships it:
+  # a new session so nothing reaps the lane, a recorded exit code so `await`
+  # reports the truth, and a liveness check so a lane that died at launch says
+  # so instead of being mistaken for one that finished.
+  launch_pid_file=''
+  launch_log=''
+  launch_settle=5
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --pid) [ "$#" -ge 2 ] || die 'launch --pid needs a path'; launch_pid_file="$2"; shift 2 ;;
+      --log) [ "$#" -ge 2 ] || die 'launch --log needs a path'; launch_log="$2"; shift 2 ;;
+      --settle) [ "$#" -ge 2 ] || die 'launch --settle needs seconds'; launch_settle="$2"; shift 2 ;;
+      --) shift; break ;;
+      *) die 'usage: linchpin.sh launch --pid PATH --log PATH [--settle SECONDS] -- COMMAND...' ;;
+    esac
+  done
+  [ -n "$launch_pid_file" ] && [ -n "$launch_log" ] ||
+    die 'usage: linchpin.sh launch --pid PATH --log PATH [--settle SECONDS] -- COMMAND...'
+  [ "$#" -ge 1 ] || die 'launch needs a command after --'
+  printf '%s\n' "$launch_settle" | grep -Eq '^[0-9]+$' ||
+    die "launch --settle is whole seconds: $launch_settle"
+  command -v "$1" >/dev/null 2>&1 || die "launch command is not executable: $1"
+
+  rm -f "$launch_pid_file" "$launch_pid_file.exit"
+  : > "$launch_log" || die "launch cannot write its log: $launch_log"
+  : > "$launch_pid_file" || die "launch cannot write its pid file: $launch_pid_file"
+
+  # The child writes its own pid rather than the parent recording `$!`. `setsid`
+  # may or may not fork depending on whether the caller is already a process
+  # group leader, so `$!` is not reliably the process `await` must watch; `$$`
+  # inside the child always is.
+  launch_runner='printf "%s\n" "$$" > "$LINCHPIN_LAUNCH_PID"
+"$@" >> "$LINCHPIN_LAUNCH_LOG" 2>&1
+printf "%s\n" "$?" > "$LINCHPIN_LAUNCH_PID.exit"'
+  launch_detach='setsid'
+  command -v setsid >/dev/null 2>&1 || launch_detach=''
+
+  LINCHPIN_LAUNCH_PID="$launch_pid_file" LINCHPIN_LAUNCH_LOG="$launch_log" \
+    $launch_detach sh -c "$launch_runner" sh "$@" < /dev/null > /dev/null 2>&1 &
+
+  # Give the child a moment to record its pid before reading it back.
+  launch_waited=0
+  while [ "$launch_waited" -lt 5 ]; do
+    [ -s "$launch_pid_file" ] && break
+    sleep 1
+    launch_waited=$((launch_waited + 1))
+  done
+  launch_pid=$(tr -dc '0-9' < "$launch_pid_file")
+  [ -n "$launch_pid" ] || {
+    printf 'LAUNCH-FAIL no-pid the lane process never started; %s is empty\n' "$launch_pid_file" >&2
+    exit 1
+  }
+
+  [ "$launch_settle" -gt 0 ] && sleep "$launch_settle"
+  if ! kill -0 "$launch_pid" 2>/dev/null; then
+    # A worker that ran a PRD does not finish in seconds. Whatever this was, it
+    # is a launch failure, and the log tail is the reason the manager needs.
+    launch_exit='unknown'
+    [ -f "$launch_pid_file.exit" ] && launch_exit=$(tr -dc '0-9' < "$launch_pid_file.exit")
+    printf 'LAUNCH-FAIL died-immediately pid=%s exit=%s after=%ss log=%s\n' \
+      "$launch_pid" "$launch_exit" "$launch_settle" "$launch_log" >&2
+    if [ -s "$launch_log" ]; then
+      tail -n 20 "$launch_log" >&2
+    else
+      printf 'LAUNCH-LOG-EMPTY the lane produced no output at all, which is what a reaped process group looks like\n' >&2
+    fi
+    exit 1
+  fi
+
+  printf 'LAUNCH-READY lane=%s pid=%s log=%s\n' \
+    "$(basename "$launch_pid_file" .pid)" "$launch_pid" "$launch_log"
+}
+
 lane_await() {
   # A lane takes tens of minutes. Managers waited on them by polling a live
   # subprocess every few seconds: one field batch spent 954 thirty-second polls
@@ -1968,6 +2050,7 @@ linchpin.sh COMMAND [ARGS]
   status LEDGER                                      read the ledger back
         exit 0 every lane delivered; 1 a lane is still open; 2 only blocked lanes remain
   worktree REPO LANE_SLUG BASE_REF [--path DIR]      create one isolated lane worktree
+  launch --pid PATH --log PATH [--settle S] -- CMD   detach one lane and prove it is alive
   await PIDFILE... [--interval S] [--timeout S]      block until a group's lanes exit
   preflight [MODELS_CACHE.json]                      check the worker model
   help                                               this text
@@ -1998,6 +2081,7 @@ case "$command_name" in
   lane) [ "$#" -ge 3 ] || die 'usage: linchpin.sh lane LEDGER LANE_ID --set key=value... [--repo DIR]'; lane_record "$@" ;;
   status) [ "$#" -eq 1 ] || die 'usage: linchpin.sh status LEDGER'; run_status "$1" ;;
   worktree) [ "$#" -ge 3 ] || die 'usage: linchpin.sh worktree REPO LANE_SLUG BASE_REF [--path DIR]'; lane_worktree "$@" ;;
+  launch) [ "$#" -ge 5 ] || die 'usage: linchpin.sh launch --pid PATH --log PATH [--settle SECONDS] -- COMMAND...'; lane_launch "$@" ;;
   await) [ "$#" -ge 1 ] || die 'usage: linchpin.sh await PIDFILE... [--interval SECONDS] [--timeout SECONDS]'; lane_await "$@" ;;
   route) [ "$#" -ge 1 ] || die 'usage: linchpin.sh route INTENT [SCORE] [PRD ...] [--config-dir DIR]'; route "$@" ;;
   mode) [ "$#" -ge 2 ] || die 'usage: linchpin.sh mode EXECUTION PRD...'; mode_selection "$@" ;;
