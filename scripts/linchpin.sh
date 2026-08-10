@@ -911,7 +911,7 @@ review_brief() {
   require_file "$ledger_file"
   review_tmp=$(mktemp -d "${TMPDIR:-/tmp}/linchpin-review.XXXXXX")
   trap 'rm -rf -- "$review_tmp"' EXIT HUP INT TERM
-  ledger_block "$ledger_file" "$lane_id" > "$review_tmp/row"
+  run_ledger_block "$ledger_file" "$lane_id" > "$review_tmp/row"
   [ -s "$review_tmp/row" ] ||
     die "run ledger has no row for lane $lane_id: $ledger_file (record the lane with linchpin.sh lane before you review it)"
   round_recorded=$(ledger_value review_rounds "$review_tmp/row")
@@ -1826,7 +1826,7 @@ ledger_lane_valid() {
   printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$'
 }
 
-ledger_block() {
+run_ledger_block() {
   # Every `- key: value` line of one lane's block, in file order. A block ends at
   # the next heading of any kind, so prose a manager adds between lanes is never
   # absorbed into the row above it.
@@ -1902,7 +1902,7 @@ lane_record() {
 
   if [ -e "$lane_file" ]; then
     [ -f "$lane_file" ] || die "run ledger is not a file: $lane_file"
-    ledger_block "$lane_file" "$lane_id" > "$lane_tmp/existing"
+    run_ledger_block "$lane_file" "$lane_id" > "$lane_tmp/existing"
   else
     lane_dir=$(dirname -- "$lane_file")
     [ -d "$lane_dir" ] || die "run ledger directory does not exist: $lane_dir (run linchpin.sh workspace first)"

@@ -153,59 +153,12 @@ isolated helper tests or an explicitly supplied target, set
 must resolve the same config, or the check reads a stale runtime pin and
 rejects a brief that is correct. The file remains optional.
 
-## Capability preflight
+## Ownership of the rest
 
-Run preflight before making branches or starting workers:
+Preflight checks, per-group mode selection, gates, review, delivery, and the
+terminal vocabulary belong to `skills/prd-swarm-coordinator/SKILL.md`; role and
+effort pins belong to `references/runtime.md`; PRD structure belongs to
+`references/prd-contract.md`. This file does not restate them — a rule written
+twice goes stale in one place first.
 
-| Check | Result on failure |
-|---|---|
-| current path is a Git repository | refuse and name the repository error |
-| `workspace` has claimed `.linchpin/` and `.worktrees/` in the repository's ignore rules | refuse to write run output that would land in the user's `git status` |
-| the PR client and the repository's permitted merge methods are known | announce branch delivery fallback; never discover this at the first merge |
-| runtime model cache contains the configured worker model with its required capability | refuse; never fall back |
-| worktree creation succeeds | announce sequential fallback for that lane group |
-| current tree is clean or safely stashable | announce sequential fallback |
-| PR remote and client exist | announce branch delivery fallback |
-
-The only refusals are a missing Git repository and a missing worker capability.
-Forced parallel mode is an explicit fail-loudly request, not a hidden fallback.
-
-## Per-group mode selection
-
-For every conforming PRD, parse all phase `Files (N)` lists using
-`references/prd-contract.md`. Build an intersection graph over the complete file
-sets and partition it into connected lane groups:
-
-- disjoint groups use `parallel` with one worktree per lane when worktrees pass;
-- intersecting groups use `sequential`, one lane at a time in the shared tree;
-- a set derived from prose `**Files:**` paragraphs joins this graph like any
-  other; a document that declares no paths at all forms its own group;
-- `execution = "sequential"` makes every group sequential;
-- `execution = "parallel"` requires every group to be parallel and fails loudly
-  if a worktree or disjointness check fails;
-- `execution = "auto"` degrades only the affected group and announces the reason;
-- a one-PRD input still goes through this same grouping, brief, gate, review, and
-  delivery sequence; it has no special single-lane shortcut.
-- `max_lanes` is a real active-lane bound. Mode and schedule output name
-  `active=` and `queued=` lanes/groups when the batch exceeds the bound.
-
-The worker brief is identical in both modes. Isolation changes where the worker
-runs, never the contract, gates, model tier, or review packet.
-
-## Delivery and terminal vocabulary
-
-The manager records one of these exact terminal forms:
-
-- `DELIVERED(pr)` or `DELIVERED(branch)` after all inherited gates pass;
-- `BLOCKED <named external reason> <resumable command>` when a real external
-  blocker remains and the lane is preserved;
-- `PARTIAL` while required work or evidence remains incomplete.
-
-`PARTIAL` is never delivered. A missing PR client changes delivery mode only; it
-does not remove review or inherited gate requirements.
-
-## Optional goal loop
-
-The goal-loop phase is not part of Codex-only v1. It may be proposed only after a
-real local Phase 1-6 merge checkpoint and an explicit user request. This local
-repository has no such checkpoint, so no goal hook or goal reference is armed.
+The goal-loop phase is not part of Codex-only v1 and no goal hook is armed.
