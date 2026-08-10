@@ -87,7 +87,12 @@ runtime_metadata() {
   fi
   [ -n "$worker_model" ] || die 'runtime.md has no Worker model pin'
   [ -n "$worker_effort" ] || die 'runtime.md has no Worker effort pin'
-  [ "$worker_mechanism" = 'codex exec' ] || die 'runtime.md Worker mechanism is not codex exec'
+  # The worker mechanism carries its sandbox flag for the reason runtime.md
+  # records: under the default workspace-write sandbox a worker cannot write the
+  # worktree's git metadata, so it cannot commit, and cannot bind the unix socket
+  # its own toolchain needs. Both were reproduced. A mechanism cell missing the
+  # flag is a lane that will report PARTIAL after the worker time is spent.
+  [ "$worker_mechanism" = 'codex exec --sandbox danger-full-access' ] || die 'runtime.md Worker mechanism is not codex exec --sandbox danger-full-access'
   [ -n "$reviewer_model" ] || die 'runtime.md has no Reviewer model pin'
   [ -n "$reviewer_effort" ] || die 'runtime.md has no Reviewer effort pin'
   [ "$reviewer_mechanism" = 'codex exec --sandbox read-only' ] || die 'runtime.md Reviewer mechanism is not read-only codex exec'

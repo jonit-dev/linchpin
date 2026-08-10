@@ -9,7 +9,7 @@ plugin. Skills refer here; they do not copy these values into their own bodies.
 |---|---|---|---|---|
 | Manager | `gpt-5.6-sol` | `medium` | current Codex session | intake, briefs, scheduling, evidence, integration |
 | Author | `gpt-5.6-sol` | `high` | `codex exec` | authoring a new PRD in `prd-creator` |
-| Worker | `gpt-5.6-luna` | `max` | `codex exec` | implementation, repair, tests, conflict resolution |
+| Worker | `gpt-5.6-luna` | `max` | `codex exec --sandbox danger-full-access` | implementation, repair, tests, conflict resolution |
 | Reviewer | `gpt-5.6-sol` | `high` | `codex exec --sandbox read-only` | one independent review per lane |
 
 Writing a PRD is the decision that every lane inherits, so it runs at the
@@ -64,11 +64,15 @@ launch it today.
 The role values above are substituted into these shapes at runtime:
 
 ```text
-<codex> exec --model <Worker.Model> -c 'model_reasoning_effort="<Worker.Effort>"' -C <lane> "$(cat <brief-file>)"
+<codex> exec --sandbox danger-full-access --model <Worker.Model> -c 'model_reasoning_effort="<Worker.Effort>"' -C <lane> "$(cat <brief-file>)"
 <codex> exec --model <Author.Model> -c 'model_reasoning_effort="<Author.Effort>"' -C <repo> "$(cat <creator-brief>)"
 <codex> exec --model <Reviewer.Model> -c 'model_reasoning_effort="<Reviewer.Effort>"' --sandbox read-only -C <lane> "$(cat <review-file>)"
-<codex> exec resume <session-id>
+<codex> exec resume <session-id> -c sandbox_mode="danger-full-access"
 ```
+
+`exec resume` has no `--sandbox` flag, so a continued worker takes the same
+access through `-c sandbox_mode`. Resuming without it drops the worker back into
+the default sandbox mid-lane, where its next commit fails.
 
 Every prompt is a file read at invocation time, the reviewer's included. The
 worker prompt is what `scripts/linchpin.sh brief ... --out <brief-file>` wrote
@@ -82,6 +86,40 @@ read `Reading additional input from stdin...` as a model response.
 
 The reviewer is never the worker's continuation. There is exactly one fresh
 review per PRD; Luna repairs findings and the manager verifies closure.
+
+## Why the worker is not sandboxed
+
+The worker row carries `--sandbox danger-full-access` because the two things a
+lane is *defined* by — a git worktree and a commit — are both impossible under
+`codex exec`'s default `workspace-write` sandbox. That sandbox makes the working
+directory writable; a worktree's git metadata does not live there. It lives in
+the parent repository at `<repo>/.git/worktrees/<slug>/`, which is outside the
+writable root, so every lane ends the same way:
+
+```text
+fatal: Unable to create '<repo>/.git/worktrees/<slug>/index.lock': Read-only file system
+```
+
+The same sandbox denies `bind`/`listen` on a unix socket, including one under
+`/tmp`, which is how `tsx` and other Node toolchains talk to their own child
+processes:
+
+```text
+SOCK_FAIL EPERM listen EPERM: operation not permitted /tmp/probe-5.sock
+```
+
+Both were reproduced directly, not inferred: the same probe under
+`--sandbox danger-full-access` commits and binds successfully. A worker that
+cannot commit produces `PARTIAL` on every lane it is given, and a worker whose
+gate commands cannot start reports setup failures where the run needs
+verification results. Widening `sandbox_workspace_write.writable_roots` fixes
+neither: the socket denial is not a path rule.
+
+The bound on the worker is therefore the lane, not the sandbox — its own
+worktree, its own branch, the file list in its brief, and a reviewer that runs
+`--sandbox read-only` and cannot edit what it judges. Do not "harden" a lane by
+putting the worker back under `workspace-write`; that does not make the run
+safer, it makes it fail later and less honestly.
 
 ## Capability preflight
 

@@ -76,9 +76,18 @@ sh $S worktree "$REPO" "$SLUG" "$BASE" \
   && sh $S brief-check "$PRD" "$REPO/.linchpin/$LANE.brief" --config-dir "$REPO" \
   && sh $S lane "$L" "$LANE" --set state=RUNNING --set prd="$PRD" --set branch="linchpin/$SLUG" \
   && sh $S launch --pid "$REPO/.linchpin/$LANE.pid" --log "$REPO/.linchpin/$LANE.log" \
-     -- codex exec --model <Worker.Model> -c 'model_reasoning_effort="<Worker.Effort>"' \
+     -- codex exec --sandbox danger-full-access \
+        --model <Worker.Model> -c 'model_reasoning_effort="<Worker.Effort>"' \
         -C "$REPO/.worktrees/$SLUG" "$(cat "$REPO/.linchpin/$LANE.brief")"
 ```
+
+`--sandbox danger-full-access` is not optional and not a shortcut. Under the
+default sandbox a worker cannot write `<repo>/.git/worktrees/<slug>/`, which is
+where a worktree keeps its git metadata, so it cannot commit and the lane can
+only end `PARTIAL`; it also cannot bind the unix socket Node toolchains use, so
+declared gates fail as setup errors. `references/runtime.md` records the
+reproduction. The lane's bound is its worktree, its branch, its file list and a
+read-only reviewer — not the worker's sandbox.
 
 Pass `--config-dir` to both `brief` and `brief-check`; a brief emitted with the
 repository's config but checked without it fails on a stale runtime pin. The
@@ -182,7 +191,9 @@ valid. State facts in the brief without classifying them — a brief that says
 A repair round is for a `DEFECT`, runs on the Worker row, and needs a handoff
 that differs from the failed prompt: exact file, line, expected behavior,
 failing command, newly required test. Never repeat an unchanged prompt. Use
-`codex exec resume <session-id>` only for a recorded continuation. Committing a
+`codex exec resume <session-id> -c sandbox_mode="danger-full-access"` only for a
+recorded continuation — `resume` takes no `--sandbox` flag, so without that
+config the continued worker cannot commit. Committing a
 diff that already exists is manager integration work, not a repair round.
 Ordinary overlap and merge conflicts are manager-directed integration; a
 semantic conflict that would violate a PRD is a named `BLOCKED` decision.

@@ -190,6 +190,15 @@ only as a `codex exec` subprocess, never as a native subagent. Sol handles the
 manager and read-only reviewer roles. When a lane needs repair, linchpin changes
 the specification or the handoff, not the model tier.
 
+A worker runs with `--sandbox danger-full-access`, because a lane is a git
+worktree and a commit and codex's default sandbox permits neither: a worktree
+keeps its metadata in the parent repository, outside the one directory that
+sandbox makes writable, so the commit fails with `Read-only file system` after
+all the worker time is spent. What bounds a worker is its own worktree, its own
+branch, the file list in its brief, and a reviewer that runs `--sandbox
+read-only` and cannot edit what it judges. `references/runtime.md` records the
+reproduction.
+
 ## Install-swap
 
 This repo does not touch anything under your Codex, Claude or Hermes

@@ -38,6 +38,7 @@ portable-prd-evidence.sh
 router-matches-intake.sh
 router-not-a-gate.sh
 no-duplicate-skills.sh
+worker-can-commit.sh
 post-swap-invoke.sh'
 
 for test_name in $tests; do
