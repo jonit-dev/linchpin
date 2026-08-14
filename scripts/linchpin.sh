@@ -16,6 +16,21 @@ require_file() {
   [ -f "$1" ] || die "missing file: $1"
 }
 
+absolute_path() {
+  # A brief is read from inside a lane worktree, never from the directory the
+  # manager typed it in. A repo-relative path resolves to nothing there whenever
+  # the PRD is not committed on the lane's base ref, which is the ordinary case
+  # for a PRD written in the same sitting as the run that executes it.
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *)
+      absolute_dir=$(CDPATH= cd -- "$(dirname -- "$1")" && pwd) ||
+        die "path does not resolve against an existing directory: $1"
+      printf '%s/%s\n' "${absolute_dir%/}" "$(basename -- "$1")"
+      ;;
+  esac
+}
+
 runtime_value() {
   runtime_role="$1"
   runtime_column="$2"
@@ -770,6 +785,7 @@ brief() {
   case "$lane_mode" in parallel|sequential) ;; *) die "lane mode must be parallel or sequential: $lane_mode" ;; esac
   case "$delivery_mode" in pr|branch) ;; *) die "delivery mode must be pr or branch: $delivery_mode" ;; esac
   require_file "$prd"
+  prd=$(absolute_path "$prd")
   runtime_metadata
   if [ -n "$brief_out" ]; then
     # A brief the manager has to retype into a prompt is a brief that gets
@@ -792,6 +808,12 @@ brief_rules() {
   # its own inside a lane.
   rule_prohibited='Prohibited actions: native Luna spawning; runtime tier changes; unsafe external install/swap actions; re-entering linchpin (do not read the linchpin router or coordinator skills, and do not run linchpin.sh route, mode, schedule, or brief — routing already happened and this brief is its result)'
   rule_scope='Scope rule: change only the files this PRD covers. Do not delete, move, or edit an unrelated file, do not bump an unrelated dependency, and do not bundle unrelated work into this lane. Something outside scope that looks wrong is a note in your report, not an edit. This rule bounds WHAT you change; it never forbids committing what you did change.'
+  # The Source PRD line resolves outside the lane worktree, and the worker holds
+  # `--sandbox danger-full-access`. Naming a path the lane can reach without
+  # bounding it trades a PRD the lane cannot read for a PRD the lane can edit
+  # under the manager, and a ticked acceptance checkbox in the source tree is
+  # exactly the edit a worker reaches for.
+  rule_source='Source rule: the Source PRD named above sits outside your lane worktree. Read it — it is the document this brief was cut from and the excerpts here are not a substitute for it — and never write to it. Everything you change belongs inside your own working directory.'
   rule_gate='Gate rule: every negative control this PRD declares needs observed-red evidence before delivery. A control the PRD never declared is not invented here.'
   # Workers told only what to change left the result uncommitted in the working
   # tree, and each of those lanes cost a second worker whose only task was `git
@@ -846,7 +868,7 @@ brief_emit() {
   printf 'Lane mode: %s\n' "$lane_mode"
   printf 'Delivery mode: %s\n' "$delivery_mode"
   brief_rules
-  printf '%s\n' "$rule_prohibited" "$rule_scope" "$rule_gate" "$rule_commit" "$rule_commit_exception" "$rule_environment"
+  printf '%s\n' "$rule_prohibited" "$rule_scope" "$rule_source" "$rule_gate" "$rule_commit" "$rule_commit_exception" "$rule_environment"
   if [ "$brief_files_resolved" = no ]; then
     printf '%s\n' 'File-set rule: this PRD declares no machine-readable file set, so establish your own from the PRD prose before you start and list every path you touched in your final summary. Without a resolved file set there is nothing definite to stage, and lanes in that position have ended with correct work left uncommitted.'
   fi
@@ -907,6 +929,7 @@ review_brief() {
   [ -n "$commit_sha" ] ||
     die 'review-brief requires --commit SHA: an uncommitted lane is PARTIAL, not reviewable — get the worker commit first'
   require_file "$prd"
+  prd=$(absolute_path "$prd")
 
   # The round cap and the ledger row are the same fact. A reviewer launched
   # without the ledger is the review that goes unrecorded, and an unrecorded
@@ -1006,7 +1029,7 @@ brief_check() {
   [ "$metadata_count" -eq 1 ] || die 'worker brief delivery mode is missing or duplicated'
   metadata_count=$(grep -Ec '^Delivery mode: (pr|branch)$' "$brief_file" || true)
   [ "$metadata_count" -eq 1 ] || die 'worker brief delivery mode is malformed'
-  for metadata_prefix in 'Worker runtime:' 'Reviewer runtime:' 'Runtime invocation:' 'Prohibited actions:' 'Scope rule:' 'Commit rule:' 'Commit rule exception:' 'Environment rule:'; do
+  for metadata_prefix in 'Worker runtime:' 'Reviewer runtime:' 'Runtime invocation:' 'Prohibited actions:' 'Scope rule:' 'Source rule:' 'Commit rule:' 'Commit rule exception:' 'Environment rule:'; do
     metadata_count=$(grep -Fc "$metadata_prefix" "$brief_file" || true)
     [ "$metadata_count" -eq 1 ] || die "worker brief metadata is missing or duplicated: $metadata_prefix"
   done
@@ -1016,6 +1039,7 @@ brief_check() {
   brief_rules
   require_exact_line "$rule_prohibited" "$brief_file" || die 'worker brief prohibited-actions metadata is missing or malformed'
   require_exact_line "$rule_scope" "$brief_file" || die 'worker brief scope rule is missing or malformed'
+  require_exact_line "$rule_source" "$brief_file" || die 'worker brief source rule is missing or malformed'
   require_exact_line "$rule_gate" "$brief_file" || die 'worker brief gate rule is missing or malformed'
   require_exact_line "$rule_commit" "$brief_file" || die 'worker brief commit rule is missing or malformed'
   require_exact_line "$rule_commit_exception" "$brief_file" || die 'worker brief commit-rule exception is missing or malformed'

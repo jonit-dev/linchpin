@@ -8,6 +8,7 @@ execute-as-written.sh
 legacy-migration.sh
 brief-contains-ledger.sh
 brief-requires-commit.sh
+brief-prd-reachable-from-lane.sh
 no-lane-recursion.sh
 review-brief-carries-gates.sh
 one-review-per-lane.sh
