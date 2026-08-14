@@ -23,6 +23,7 @@ mode-selection.sh
 worktree-fallback.sh
 intent-routing.sh
 config-optional.sh
+subcommand-help.sh
 runtime-override.sh
 gate-evidence.sh
 no-model-escalation.sh

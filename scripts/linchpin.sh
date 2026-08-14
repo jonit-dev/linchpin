@@ -2148,8 +2148,31 @@ EXECUTION is auto, parallel, or sequential.
 USAGE
 }
 
+command_usage() {
+  # The usage screen is the only description of an argument order, so it is also
+  # the answer to `<command> --help`. Reading it back beats a second copy per
+  # command, which is how the two drift apart. An entry is its own line plus any
+  # deeper-indented continuation lines under it.
+  usage | awk -v want="$1" '
+    $0 ~ "^  " want "( |$)" { entry = 1; print; next }
+    entry && /^ {8}/ { print; next }
+    entry { exit }
+  '
+}
+
 command_name="${1:-}"
-shift || true
+[ "$#" -eq 0 ] || shift
+# A manager asks the tool before it guesses. Answering `lane --help` with
+# `ERROR: usage: linchpin.sh lane ...` at exit 1 reads as a broken command, and
+# the guess that follows is the ledger row nothing writes.
+case "${1:-}" in
+  --help|-h)
+    command_help=$(command_usage "$command_name")
+    [ -n "$command_help" ] || die "no such command: $command_name (run linchpin.sh help)"
+    printf '%s\n' "$command_help"
+    exit 0
+    ;;
+esac
 case "$command_name" in
   contract) [ "$#" -eq 1 ] || die 'usage: linchpin.sh contract PRD'; contract_check "$1" ;;
   migrate) [ "$#" -ge 1 ] || die 'usage: linchpin.sh migrate PRD [--out PATH] [--force]'; migrate "$@" ;;

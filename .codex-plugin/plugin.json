@@ -1,6 +1,6 @@
 {
   "name": "linchpin",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Codex-only PRD swarm orchestration with contract-preserving intake.",
   "author": {
     "name": "Linchpin contributors",
