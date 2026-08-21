@@ -15,6 +15,7 @@ one-review-per-lane.sh
 workspace-ignored.sh
 run-ledger.sh
 lane-worktree-isolation.sh
+prune-after-run.sh
 launch-detaches-lane.sh
 await-group-not-poll.sh
 files-list-parseable.sh

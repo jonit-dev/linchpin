@@ -234,8 +234,17 @@ Exit `0` only when every lane is `DELIVERED(...)`, `1` while any lane is open,
 `2` when the only unfinished lanes are `BLOCKED`. Summarizing eight lanes from
 memory is where a run starts reporting work it did not do.
 
-Then restore the workspace: remove each terminal lane's worktree, prune the
-worktree list, and delete merged lane branches. Keep the worktree and branch of
-any `PARTIAL` or `BLOCKED` lane and name what was kept plus the command that
-resumes or removes it. Leave `.linchpin/` as the run record. The final report
-maps every ledger row to a command, `file:line`, or captured result.
+Then restore the workspace with the command, not by hand:
+
+```sh
+sh $S prune "$L" --repo "$REPO"
+```
+
+It removes each delivered lane's worktree and branch, and keeps — naming each
+one and what to do about it — every lane that is not delivered, every worktree
+holding uncommitted work, and every branch whose commits are neither in the base
+nor on the remote. A squash-merged lane counts as merged; `git branch -d` does
+not know that, which is why deleting lane branches by hand leaves them behind.
+Read its output into the report rather than describing what you intended to
+clean. Leave `.linchpin/` as the run record. The final report maps every ledger
+row to a command, `file:line`, or captured result.

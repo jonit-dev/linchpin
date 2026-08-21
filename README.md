@@ -3,7 +3,7 @@
 [![verify](https://github.com/jonit-dev/linchpin/actions/workflows/verify.yml/badge.svg)](https://github.com/jonit-dev/linchpin/actions/workflows/verify.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![codex plugin](https://img.shields.io/badge/codex-plugin-black.svg)](https://developers.openai.com/codex/)
-[![version](https://img.shields.io/badge/version-0.9.2-informational.svg)](.codex-plugin/plugin.json)
+[![version](https://img.shields.io/badge/version-0.10.0-informational.svg)](.codex-plugin/plugin.json)
 
 A Codex plugin that takes your PRDs and builds them.
 
@@ -154,9 +154,18 @@ lane commit. If you want the ignore rule committed for your team, add
 `.linchpin/` to `.gitignore` yourself.
 
 Keep `.linchpin/` to resume or audit a run, delete it when you are done.
-Worktrees and merged lane branches are cleaned up at the end of the run. A lane
-that finished `PARTIAL` or `BLOCKED` keeps its worktree and branch on purpose;
-the final report names each one and the command that resumes it.
+Worktrees and lane branches are cleaned up at the end of every batch:
+
+```sh
+sh scripts/linchpin.sh prune .linchpin/run-1738000000.md
+```
+
+A delivered lane loses its worktree and its branch. Everything else is kept and
+named: a lane that finished `PARTIAL` or `BLOCKED`, a worktree with uncommitted
+work in it, and a branch whose commits are neither in your base branch nor on
+the remote. A lane that shipped as a squashed PR counts as merged — `git branch
+-d` does not know that, which is why lane branches pile up when they are deleted
+by hand. Add `--dry-run` to see the list before anything is removed.
 
 ## Checking what a run actually delivered
 

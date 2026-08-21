@@ -2112,6 +2112,213 @@ run_status() {
   [ "$status_blocked" -eq 0 ] || exit 2
 }
 
+prune_worktree_path() {
+  # The path git actually has checked out for a lane branch, not the path the
+  # convention predicts. A lane created with `worktree --path` lives somewhere
+  # else, and removing the predicted directory would leave that one behind.
+  git -C "$prune_repo" worktree list --porcelain | awk -v want="refs/heads/$1" '
+    /^worktree / { path = substr($0, 10) }
+    /^branch / { if (substr($0, 8) == want) { print path; exit } }
+  '
+}
+
+prune_safe_reason() {
+  # Prints why a lane branch is safe to delete, or nothing. Deleting a lane
+  # branch throws away the only local reference to its commits, so this asks the
+  # three ways that work survives instead of trusting the ledger's word for it:
+  # the base already contains the commits; the base contains the same change
+  # under a different sha, which is what a squash merge leaves behind and what
+  # makes `git branch -d` call a merged lane unmerged; or the branch is on the
+  # remote, where the PR that carries it lives.
+  prune_check_branch="$1"
+  prune_check_sha=$(git -C "$prune_repo" rev-parse --verify --quiet "refs/heads/$prune_check_branch") || return 0
+  for prune_base_ref in $prune_base_refs; do
+    if git -C "$prune_repo" merge-base --is-ancestor "$prune_check_sha" "$prune_base_ref" 2>/dev/null; then
+      printf 'merged-into-%s\n' "$prune_base_ref"
+      return 0
+    fi
+  done
+  for prune_base_ref in $prune_base_refs; do
+    prune_merge_base=$(git -C "$prune_repo" merge-base "$prune_base_ref" "$prune_check_sha" 2>/dev/null) || continue
+    # The lane's whole change as one commit on the merge base, which is the shape
+    # a squash merge produced on the base. `git cherry` compares patch ids, so
+    # `-` means the base already carries this change under another sha.
+    prune_probe=$(git -C "$prune_repo" commit-tree "$prune_check_sha^{tree}" -p "$prune_merge_base" -m 'linchpin prune probe' 2>/dev/null) || continue
+    case "$(git -C "$prune_repo" cherry "$prune_base_ref" "$prune_probe" 2>/dev/null | head -n 1)" in
+      -*) printf 'squashed-onto-%s\n' "$prune_base_ref"; return 0 ;;
+    esac
+  done
+  prune_remote_sha=$(git -C "$prune_repo" rev-parse --verify --quiet "refs/remotes/origin/$prune_check_branch") || prune_remote_sha=''
+  if [ -n "$prune_remote_sha" ] && [ "$prune_remote_sha" = "$prune_check_sha" ]; then
+    printf 'pushed-to-origin/%s\n' "$prune_check_branch"
+  fi
+}
+
+prune_run() {
+  # Closing a run used to be prose: the coordinator told the manager to remove
+  # each terminal lane's worktree and delete the merged branches by hand. What
+  # that produced after a batch was a `.worktrees/` directory of finished lanes
+  # and a `git branch` listing where the user could not tell which lanes were
+  # already shipped, because the ordinary squash merge leaves a lane branch
+  # looking unmerged. Cleanup is a mechanism, so linchpin ships it: terminal
+  # lanes go, unfinished lanes stay with the command that resumes them, and
+  # nothing is deleted before its commits are proven to exist somewhere else.
+  prune_ledger=''
+  prune_repo=''
+  prune_base=''
+  prune_dry=0
+  prune_force=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --repo) [ "$#" -ge 2 ] || die 'prune --repo needs a directory'; prune_repo="$2"; shift 2 ;;
+      --base) [ "$#" -ge 2 ] || die 'prune --base needs a ref'; prune_base="$2"; shift 2 ;;
+      --dry-run) prune_dry=1; shift ;;
+      --force) prune_force=1; shift ;;
+      --*) die "unknown prune option: $1" ;;
+      *)
+        [ -z "$prune_ledger" ] || die "unexpected prune argument: $1"
+        prune_ledger="$1"
+        shift ;;
+    esac
+  done
+  [ -n "$prune_ledger" ] || die 'usage: linchpin.sh prune LEDGER [--repo DIR] [--base REF] [--dry-run] [--force]'
+  require_file "$prune_ledger"
+  command -v git >/dev/null 2>&1 || die 'git is required to prune a run'
+  [ -n "$prune_repo" ] || prune_repo=$(CDPATH= cd -- "$(dirname -- "$(dirname -- "$prune_ledger")")" && pwd)
+  [ -d "$prune_repo" ] || die "prune target is not a directory: $prune_repo"
+  git -C "$prune_repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+    die "prune target is not a Git repository: $prune_repo (pass --repo)"
+  # A lane cannot remove the worktree it is standing in, and a manager that
+  # closed the run from inside the last lane would get one confusing git error
+  # instead of the list of what was cleaned.
+  if [ "$(git -C "$prune_repo" rev-parse --git-dir)" != "$(git -C "$prune_repo" rev-parse --git-common-dir)" ]; then
+    die "prune target is itself a linked worktree: $prune_repo (run it from the main worktree)"
+  fi
+
+  if [ -z "$prune_base" ]; then
+    prune_base=$(git -C "$prune_repo" symbolic-ref --quiet --short HEAD 2>/dev/null) || prune_base=''
+    [ -n "$prune_base" ] || prune_base='HEAD'
+  fi
+  # The remote base first, for the same reason lane creation branches from it:
+  # the merge that retired these lanes landed there, and a local base that never
+  # pulled would call every shipped lane unmerged.
+  if [ "$prune_base" != 'HEAD' ] && git -C "$prune_repo" remote get-url origin >/dev/null 2>&1; then
+    git -C "$prune_repo" fetch --quiet origin "$prune_base" 2>/dev/null || true
+  fi
+  prune_base_refs=''
+  for prune_candidate in "origin/$prune_base" "$prune_base"; do
+    git -C "$prune_repo" rev-parse --verify --quiet "$prune_candidate" >/dev/null || continue
+    prune_base_refs="$prune_base_refs $prune_candidate"
+  done
+  [ -n "$prune_base_refs" ] || die "prune base does not resolve in $prune_repo: $prune_base"
+
+  prune_tmp=$(mktemp -d "${TMPDIR:-/tmp}/linchpin-prune.XXXXXX")
+  trap 'rm -rf -- "$prune_tmp"' EXIT HUP INT TERM
+  awk '
+    function trim(value) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      return value
+    }
+    function flush() {
+      if (lane != "") print (value["state"] == "" ? "UNRECORDED" : value["state"]) "\t" lane "\t" value["branch"] "\t" value["resume"]
+      lane = ""
+      split("", value)
+    }
+    /^## / {
+      flush()
+      if ($0 ~ /^## Lane: /) lane = trim(substr($0, 10))
+      next
+    }
+    lane != "" && /^- [a-z][a-z0-9_]*:/ {
+      entry = substr($0, 3)
+      split_at = index(entry, ":")
+      value[substr(entry, 1, split_at - 1)] = trim(substr(entry, split_at + 1))
+    }
+    END { flush() }
+  ' "$prune_ledger" > "$prune_tmp/lanes"
+  [ -s "$prune_tmp/lanes" ] || die "run ledger has no lane rows: $prune_ledger"
+
+  prune_worktrees=0
+  prune_branches=0
+  prune_kept=0
+  while IFS="$(printf '\t')" read -r prune_state prune_lane prune_branch prune_resume; do
+    [ -n "$prune_lane" ] || continue
+    case "$prune_branch" in
+      ''|none|NONE) prune_branch='' ;;
+    esac
+    [ -z "$prune_branch" ] || prune_path=$(prune_worktree_path "$prune_branch")
+    [ -n "$prune_branch" ] || prune_path=''
+
+    case "$prune_state" in
+      'DELIVERED(pr)'|'DELIVERED(branch)') ;;
+      *)
+        # Everything that is not delivered keeps both its worktree and its
+        # branch. A run that cleaned up a BLOCKED lane would delete the state
+        # its own resume command needs.
+        printf 'PRUNE-KEPT lane=%s state=%s' "$prune_lane" "$prune_state"
+        [ -z "$prune_branch" ] || printf ' branch=%s' "$prune_branch"
+        [ -z "$prune_path" ] || printf ' worktree=%s' "$prune_path"
+        printf ' reason=not-delivered'
+        [ -z "$prune_resume" ] || printf ' resume=%s' "$prune_resume"
+        printf '\n'
+        prune_kept=$((prune_kept + 1))
+        continue ;;
+    esac
+
+    if [ -n "$prune_path" ]; then
+      prune_dirty=$(git -C "$prune_path" status --porcelain 2>/dev/null || true)
+      if [ -n "$prune_dirty" ] && [ "$prune_force" -eq 0 ]; then
+        # Delivery is recorded against a commit, so anything still uncommitted
+        # here is work nobody reviewed and nothing carries. Deleting it is the
+        # one thing cleanup must never do quietly.
+        printf 'PRUNE-KEPT lane=%s state=%s worktree=%s reason=uncommitted-changes next=git -C %s status\n' \
+          "$prune_lane" "$prune_state" "$prune_path" "$prune_path"
+        prune_kept=$((prune_kept + 1))
+        continue
+      fi
+      if [ "$prune_dry" -eq 1 ]; then
+        printf 'PRUNE-WOULD-REMOVE lane=%s worktree=%s\n' "$prune_lane" "$prune_path"
+      elif prune_error=$(git -C "$prune_repo" worktree remove --force "$prune_path" 2>&1); then
+        printf 'PRUNE-WORKTREE lane=%s path=%s\n' "$prune_lane" "$prune_path"
+        prune_worktrees=$((prune_worktrees + 1))
+      else
+        printf 'PRUNE-KEPT lane=%s state=%s worktree=%s reason=%s\n' \
+          "$prune_lane" "$prune_state" "$prune_path" "$(printf '%s' "$prune_error" | tr '\n' ' ')"
+        prune_kept=$((prune_kept + 1))
+        continue
+      fi
+    fi
+
+    [ -n "$prune_branch" ] || continue
+    git -C "$prune_repo" show-ref --verify --quiet "refs/heads/$prune_branch" || continue
+    prune_reason=$(prune_safe_reason "$prune_branch")
+    if [ -z "$prune_reason" ]; then
+      printf 'PRUNE-KEPT-BRANCH lane=%s branch=%s reason=commits-only-here next=git -C %s branch -D %s\n' \
+        "$prune_lane" "$prune_branch" "$prune_repo" "$prune_branch"
+      prune_kept=$((prune_kept + 1))
+      continue
+    fi
+    if [ "$prune_dry" -eq 1 ]; then
+      printf 'PRUNE-WOULD-DELETE lane=%s branch=%s reason=%s\n' "$prune_lane" "$prune_branch" "$prune_reason"
+      continue
+    fi
+    # `-D`, not `-d`, and only after the reason above proved where the commits
+    # live: `-d` refuses the squash-merged branch that is the ordinary case here.
+    git -C "$prune_repo" branch -D "$prune_branch" >/dev/null 2>&1 ||
+      die "lane branch could not be deleted: $prune_branch"
+    printf 'PRUNE-BRANCH lane=%s branch=%s reason=%s\n' "$prune_lane" "$prune_branch" "$prune_reason"
+    prune_branches=$((prune_branches + 1))
+  done < "$prune_tmp/lanes"
+
+  if [ "$prune_dry" -eq 0 ]; then
+    git -C "$prune_repo" worktree prune
+    # Only when it is empty: an empty `.worktrees/` is leftover, a populated one
+    # is a lane the run decided to keep.
+    rmdir "$prune_repo/.worktrees" 2>/dev/null || true
+  fi
+  printf 'PRUNE-DONE worktrees=%s branches=%s kept=%s\n' "$prune_worktrees" "$prune_branches" "$prune_kept"
+}
+
 usage() {
   cat <<'USAGE'
 linchpin.sh COMMAND [ARGS]
@@ -2139,6 +2346,11 @@ linchpin.sh COMMAND [ARGS]
   status LEDGER                                      read the ledger back
         exit 0 every lane delivered; 1 a lane is still open; 2 only blocked lanes remain
   worktree REPO LANE_SLUG BASE_REF [--path DIR]      create one isolated lane worktree
+  prune LEDGER [--repo DIR] [--base REF]              clean up after a finished run
+        [--dry-run] [--force]
+        removes each delivered lane's worktree and branch; keeps every lane that
+        is not delivered, has uncommitted changes, or whose commits exist nowhere
+        but that branch, and names what it kept
   launch --pid PATH --log PATH [--settle S] -- CMD   detach one lane and prove it is alive
   await PIDFILE... [--interval S] [--timeout S]      block until a group's lanes exit
   preflight [MODELS_CACHE.json]                      check the worker model
@@ -2192,6 +2404,7 @@ case "$command_name" in
   workspace) [ "$#" -le 1 ] || die 'usage: linchpin.sh workspace [repo]'; workspace "${1:-}" ;;
   lane) [ "$#" -ge 3 ] || die 'usage: linchpin.sh lane LEDGER LANE_ID --set key=value... [--repo DIR]'; lane_record "$@" ;;
   status) [ "$#" -eq 1 ] || die 'usage: linchpin.sh status LEDGER'; run_status "$1" ;;
+  prune) [ "$#" -ge 1 ] || die 'usage: linchpin.sh prune LEDGER [--repo DIR] [--base REF] [--dry-run] [--force]'; prune_run "$@" ;;
   worktree) [ "$#" -ge 3 ] || die 'usage: linchpin.sh worktree REPO LANE_SLUG BASE_REF [--path DIR]'; lane_worktree "$@" ;;
   launch) [ "$#" -ge 5 ] || die 'usage: linchpin.sh launch --pid PATH --log PATH [--settle SECONDS] -- COMMAND...'; lane_launch "$@" ;;
   await) [ "$#" -ge 1 ] || die 'usage: linchpin.sh await PIDFILE... [--interval SECONDS] [--timeout SECONDS]'; lane_await "$@" ;;
