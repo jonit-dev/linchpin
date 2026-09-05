@@ -128,6 +128,7 @@ base = "auto"         # auto = repository default branch
 review = true         # false is accepted only when explicitly typed
 max_lanes = 4
 prd_floor = 3
+audit = "auto"        # on | off | auto
 worker = ""           # "" = use the runtime.md pin; an alias, see below
 worker_effort = ""    # "" = use the runtime.md pin; the provider's domain
 reviewer = ""         # "" = use the runtime.md pin; an alias, see below
@@ -163,6 +164,51 @@ Preflight then verifies every resolved role before any branch exists: a codex
 role against the local capability cache, a claude role with one live
 `--max-turns 1` probe per distinct model. Either failing is a hard refusal with
 no fallback, exactly as a missing default would be.
+
+### Audit mode
+
+`audit` decides whether a batch gets one independent audit of the combined
+result on top of its per-lane reviews. It is the expensive call in a run, so it
+is spent by declared complexity rather than per run by whoever is asking.
+
+| Mode | Meaning | When it applies |
+|---|---|---|
+| `auto` | Audit a batch holding at least one HIGH PRD, using the complexity the PRD declares. | Shipped default. HIGH means score 7 or greater. |
+| `on` | Audit the batch regardless of complexity. | Explicit opt-in for an otherwise ineligible batch. |
+| `off` | No auditor capability check, provider probe, launch, or audit gate. | Explicit override; ordinary review and every required gate remain. |
+
+`scripts/linchpin.sh audit PRD... [--mode on|off|auto] [--assess PRD=SCORE:FACTORS]
+[--out PATH] [--config-dir DIR]` is the decision, and it is the only place the
+decision is made:
+
+- it reads the numeric declaration out of the PRD's opening metadata, in the
+  creator's bold form (`**Complexity: 7 → HIGH mode**`) or the same sentence in
+  plain text;
+- a numeric score beats an inconsistent label and prints `AUDIT-DISCREPANCY`
+  saying so. A recognized label with no number supplies the classification and
+  records that no score was declared;
+- a malformed, contradictory, or absent declaration exits `3` with
+  `BOOTSTRAP-NEEDS-COMPLEXITY <path>`. That is the orchestrator's work, not the
+  user's: score the PRD with the creator rubric during bootstrap and pass
+  `--assess <path>=SCORE:FACTORS`. Do not edit the source PRD, and do not ask
+  the user to classify routine work;
+- factor names are `files-1-5`, `files-6-10`, `files-10-plus` (mutually
+  exclusive), `new-module`, `concurrency-state`, `multi-package`,
+  `database-schema`, `external-api`. An assessment whose factors do not sum to
+  its score is refused;
+- `--out` freezes the resolved decision as bootstrap JSON. An unresolved
+  eligibility is never frozen.
+
+Precedence is **this run's override, then `.linchpin.toml`, then the shipped
+`auto`**. A sentence such as *"execute XYZ with @linchpin but leave auditor
+off"* is run-local and must not rewrite `.linchpin.toml`; changing the
+repository default requires a request that explicitly says so. Contradictory
+instructions in one request (`on` and `off` together) fail with one short
+clarification before anything paid is launched. An unknown mode fails at
+configuration time rather than at the audit checkpoint.
+
+There is no `risk` enum, probability slider, or sampling mode. The count is per
+logical batch — not per PRD, lane, commit, or polling cycle.
 
 ### `.linchpin-models.toml`
 

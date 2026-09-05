@@ -8,7 +8,7 @@
 # then guesses the arguments, and a guessed `lane` call is a ledger row that
 # never gets written.
 
-for helped in brief brief-check review-brief lane worktree gate status launch await mode route schedule assign config workspace preflight files contract migrate; do
+for helped in brief brief-check review-brief lane worktree gate audit status launch await mode route schedule assign config workspace preflight files contract migrate; do
   help_out="$tmp_dir/help-$helped.out"
   if ! sh "$repo_root/scripts/linchpin.sh" "$helped" --help > "$help_out" 2>&1; then
     cat "$help_out" >&2

@@ -846,6 +846,8 @@ load_config() {
       review) review="$config_value" ;;
       max_lanes) max_lanes="$config_value" ;;
       prd_floor) prd_floor="$config_value" ;;
+      audit) cfg_audit="$config_value" ;;
+      audit_source) cfg_audit_source="$config_value" ;;
       worker) cfg_worker_model="$config_value" ;;
       reviewer) cfg_reviewer_model="$config_value" ;;
       worker_effort) cfg_worker_effort="$config_value" ;;
@@ -1251,6 +1253,12 @@ config_values() {
   review=true
   max_lanes=4
   prd_floor=3
+  # `auto` audits HIGH-complexity PRDs only. It ships as the default because the
+  # audit is the expensive call in the run: `on` spends it on work that does not
+  # warrant it, and `off` as a default is how an eligible batch ships unaudited
+  # with nothing recording that the decision was ever made.
+  audit=auto
+  audit_source=default
   # Empty means "use the pin in runtime.md" — the zero-config default.
   worker_effort_override=
   reviewer_effort_override=
@@ -1272,6 +1280,7 @@ config_values() {
         review) review="$value" ;;
         max_lanes) max_lanes="$value" ;;
         prd_floor) prd_floor="$value" ;;
+        audit) audit="$value"; audit_source=config ;;
         worker) worker_override="$value" ;;
         reviewer) reviewer_override="$value" ;;
         worker_effort) worker_effort_override="$value" ;;
@@ -1286,6 +1295,11 @@ config_values() {
     ''|*[!A-Za-z0-9._/-]*) die "base must be auto or a branch name: $base" ;;
   esac
   case "$review" in true|false) ;; *) die "review must be true or false" ;; esac
+  # An unknown mode fails here, at configuration time, rather than at the audit
+  # checkpoint after every lane has been built. There is no third behavior to
+  # guess at: a typo like `audit = "sometimes"` is a refusal, never a silent
+  # `off` that skips the gate the repository asked for.
+  case "$audit" in on|off|auto) ;; *) die "audit must be on, off, or auto: $audit" ;; esac
   case "$max_lanes" in *[!0-9]*|0|"") die "max_lanes must be a positive integer" ;; esac
   case "$prd_floor" in *[!0-9]*|"") die "prd_floor must be a non-negative integer" ;; esac
   # Validate the alias against the table that actually resolves it, so adding a
@@ -1322,10 +1336,199 @@ config_values() {
     [ "$role_effort_ok" = yes ] ||
       die "${role_name}_effort must be one of: $role_domain (the $role_provider effort domain): $role_effort"
   done
-  printf 'execution=%s\ndelivery=%s\nbase=%s\nreview=%s\nmax_lanes=%s\nprd_floor=%s\nworker=%s\nreviewer=%s\nworker_effort=%s\nreviewer_effort=%s\n' \
+  printf 'execution=%s\ndelivery=%s\nbase=%s\nreview=%s\nmax_lanes=%s\nprd_floor=%s\naudit=%s\naudit_source=%s\nworker=%s\nreviewer=%s\nworker_effort=%s\nreviewer_effort=%s\n' \
     "$execution" "$delivery" "$base" "$review" "$max_lanes" "$prd_floor" \
+    "$audit" "$audit_source" \
     "$worker_override" "$reviewer_override" \
     "$worker_effort_override" "$reviewer_effort_override"
+}
+
+audit_policy() {
+  # The policy module is reached by subcommand, not by sourcing it: a caller
+  # that sources it inherits its rubric constants and its variables, and two
+  # copies of "7 or greater is HIGH" is how the shipped threshold and the
+  # documented one stop agreeing.
+  sh "$script_dir/audit-policy.sh" "$@"
+}
+
+audit_decision() {
+  audit_mode_request=''
+  audit_config_dir="${LINCHPIN_CONFIG_DIR:-$PWD}"
+  audit_out=''
+  audit_tmp=$(mktemp -d "${TMPDIR:-/tmp}/linchpin-audit.XXXXXX")
+  trap 'rm -rf -- "$audit_tmp"' EXIT HUP INT TERM
+  : > "$audit_tmp/prds"
+  : > "$audit_tmp/assessed"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --mode|--audit)
+        [ "$#" -ge 2 ] || die "audit $1 needs on, off, or auto"
+        case "$2" in
+          on|off|auto) ;;
+          *) die "audit mode must be on, off, or auto: $2" ;;
+        esac
+        # Two run-local overrides that disagree are the one case the PRD asks to
+        # stop for: "use an auditor but leave it off" has no defensible reading,
+        # and guessing either way either wastes a paid call or skips a required
+        # gate. One clarification, before anything is launched.
+        if [ -n "$audit_mode_request" ] && [ "$audit_mode_request" != "$2" ]; then
+          die "contradictory audit instructions for this run: $audit_mode_request and $2. Say which one applies; nothing is launched until you do."
+        fi
+        audit_mode_request="$2"
+        shift 2
+        ;;
+      --mode=*|--audit=*)
+        set -- --mode "${1#*=}" "$@"
+        shift
+        ;;
+      --assess)
+        [ "$#" -ge 2 ] || die 'audit --assess needs PRD=SCORE:FACTOR[,FACTOR...]'
+        printf '%s\n' "$2" >> "$audit_tmp/assessed"
+        shift 2
+        ;;
+      --assess=*)
+        printf '%s\n' "${1#--assess=}" >> "$audit_tmp/assessed"
+        shift
+        ;;
+      --config-dir)
+        [ "$#" -ge 2 ] || die 'audit --config-dir needs a directory'
+        audit_config_dir="$2"
+        shift 2
+        ;;
+      --config-dir=*) audit_config_dir="${1#--config-dir=}"; shift ;;
+      --out)
+        [ "$#" -ge 2 ] || die 'audit --out needs a path'
+        audit_out="$2"
+        shift 2
+        ;;
+      --out=*) audit_out="${1#--out=}"; shift ;;
+      --*) die "unknown audit option: $1" ;;
+      *) printf '%s\n' "$1" >> "$audit_tmp/prds"; shift ;;
+    esac
+  done
+  [ -s "$audit_tmp/prds" ] || die 'usage: linchpin.sh audit PRD... [--mode on|off|auto] [--assess PRD=SCORE:FACTORS] [--out PATH] [--config-dir DIR]'
+  load_config "$audit_config_dir"
+  # Precedence, once, in one place: an explicit run override, then the
+  # repository setting, then the shipped default. A run override is never
+  # written back — that is what makes it run-local.
+  if [ -n "$audit_mode_request" ]; then
+    audit_mode="$audit_mode_request"
+    audit_mode_source=request
+  else
+    audit_mode="$cfg_audit"
+    audit_mode_source="$cfg_audit_source"
+  fi
+
+  : > "$audit_tmp/classes"
+  : > "$audit_tmp/unknown"
+  : > "$audit_tmp/report"
+  while IFS= read -r audit_prd; do
+    [ -n "$audit_prd" ] || continue
+    require_file "$audit_prd"
+    audit_row=$(audit_policy declaration "$audit_prd")
+    audit_score=$(printf '%s' "$audit_row" | cut -f1)
+    audit_class=$(printf '%s' "$audit_row" | cut -f2)
+    audit_declared_source=$(printf '%s' "$audit_row" | cut -f3)
+    audit_note=$(printf '%s' "$audit_row" | cut -f4)
+    if [ "$audit_class" = none ]; then
+      # A bootstrap assessment supplied by the orchestrator stands in for a
+      # declaration the PRD never made. It is validated against the same rubric
+      # rather than trusted: an assessment whose factors do not add up to its
+      # score is not evidence of anything.
+      audit_supplied=$(awk -F '=' -v want="$audit_prd" '
+        { path = $1; sub(/^[^=]*=/, "", $0) }
+        path == want { print; exit }
+      ' "$audit_tmp/assessed")
+      if [ -n "$audit_supplied" ]; then
+        audit_assessed_score=${audit_supplied%%:*}
+        audit_assessed_factors=${audit_supplied#*:}
+        [ "$audit_assessed_factors" != "$audit_supplied" ] ||
+          die "audit --assess needs PRD=SCORE:FACTOR[,FACTOR...]: $audit_prd=$audit_supplied"
+        audit_assessment=$(audit_policy assess "$audit_assessed_score" "$audit_assessed_factors")
+        audit_score="$audit_assessed_score"
+        audit_class=$(printf '%s' "$audit_assessment" | sed -n 's/.*class=\([A-Z]*\).*/\1/p')
+        audit_declared_source=assessed
+        audit_note="bootstrap assessment: $(printf '%s' "$audit_assessment" | sed -n 's/.*factors=//p')"
+      else
+        audit_class=UNKNOWN
+        printf '%s\n' "$audit_prd" >> "$audit_tmp/unknown"
+      fi
+    fi
+    printf '%s\n' "$audit_class" >> "$audit_tmp/classes"
+    printf 'AUDIT-PRD path=%s score=%s class=%s source=%s note=%s\n' \
+      "$audit_prd" "$audit_score" "$audit_class" "$audit_declared_source" "$audit_note" >> "$audit_tmp/report"
+    # A score that contradicts its own label is recorded where a reader will see
+    # it, not resolved in silence. The score still wins. A bootstrap assessment
+    # is not a discrepancy — it is the factor evidence for a score the PRD never
+    # declared, and labelling it as a discrepancy is how a reader learns to skim
+    # past the line that does report one.
+    case "$audit_declared_source" in
+      assessed)
+        printf 'AUDIT-ASSESSED path=%s %s\n' "$audit_prd" "$audit_note" >> "$audit_tmp/report"
+        ;;
+      *)
+        case "$audit_note" in
+          none|'no complexity declaration in the PRD') ;;
+          *) printf 'AUDIT-DISCREPANCY path=%s %s\n' "$audit_prd" "$audit_note" >> "$audit_tmp/report" ;;
+        esac
+        ;;
+    esac
+  done < "$audit_tmp/prds"
+
+  audit_classes=$(tr '\n' ' ' < "$audit_tmp/classes")
+  # shellcheck disable=SC2086
+  audit_verdict=$(audit_policy eligible "$audit_mode" $audit_classes)
+  audit_eligible=$(printf '%s' "$audit_verdict" | cut -f1 | sed 's/^eligible=//')
+  audit_reason=$(printf '%s' "$audit_verdict" | cut -f2 | sed 's/^reason=//')
+
+  cat "$audit_tmp/report"
+  printf 'AUDIT-MODE mode=%s source=%s\n' "$audit_mode" "$audit_mode_source"
+  printf 'AUDIT-ELIGIBLE eligible=%s reason=%s\n' "$audit_eligible" "$audit_reason"
+
+  if [ "$audit_eligible" = unresolved ]; then
+    # The orchestrator resolves this by scoring the PRD with the creator rubric
+    # and passing it back through --assess. It is not a question for the user,
+    # and it is not a decision that may be frozen: writing an unresolved
+    # eligibility into bootstrap state is how a HIGH PRD ships unaudited.
+    while IFS= read -r audit_prd; do
+      [ -n "$audit_prd" ] || continue
+      printf 'BOOTSTRAP-NEEDS-COMPLEXITY %s (assess with the creator rubric and pass --assess %s=SCORE:FACTORS; do not ask the user to classify routine work)\n' \
+        "$audit_prd" "$audit_prd"
+    done < "$audit_tmp/unknown"
+    exit 3
+  fi
+
+  if [ -n "$audit_out" ]; then
+    command -v jq >/dev/null 2>&1 || die 'jq is required to write frozen audit bootstrap state'
+    audit_prd_json=$(
+      awk '
+        function field(line, key,   value) {
+          match(line, key "=")
+          if (RSTART == 0) return ""
+          value = substr(line, RSTART + length(key) + 1)
+          return value
+        }
+        /^AUDIT-PRD / {
+          path = $2; sub(/^path=/, "", path)
+          score = $3; sub(/^score=/, "", score)
+          class = $4; sub(/^class=/, "", class)
+          source = $5; sub(/^source=/, "", source)
+          note = $0; sub(/^.* note=/, "", note)
+          printf "%s\t%s\t%s\t%s\t%s\n", path, score, class, source, note
+        }
+      ' "$audit_tmp/report" |
+      jq -R -s 'split("\n") | map(select(length > 0) | split("\t") |
+        {path: .[0], score: .[1], class: .[2], source: .[3], note: .[4]})'
+    )
+    jq -n --arg mode "$audit_mode" --arg mode_source "$audit_mode_source" \
+      --arg eligible "$audit_eligible" --arg reason "$audit_reason" \
+      --argjson prds "$audit_prd_json" '{
+        bootstrap_contract: "v1",
+        audit: {mode: $mode, mode_source: $mode_source, eligible: $eligible, reason: $reason},
+        prds: $prds
+      }' > "$audit_out"
+    printf 'AUDIT-FROZEN %s\n' "$audit_out"
+  fi
 }
 
 execute_intent='run|execute|start|begin|launch|resume|continue|kick off'
@@ -3018,6 +3221,13 @@ linchpin.sh COMMAND [ARGS]
   schedule EXECUTION STATUS LANE... [--config-dir DIR]
         STATUS: ok | worktree-fail | dirty-tree | unparsed-files | config
   gate PRD REPORT                                    check observed-red evidence
+  audit PRD... [--mode on|off|auto] [--out PATH]      say whether this batch is audited
+        [--assess PRD=SCORE:FACTORS] [--config-dir DIR]
+        mode precedence: this run's --mode, then .linchpin.toml, then auto
+        auto audits a batch holding at least one HIGH (score 7+) PRD
+        a PRD with no usable complexity declaration exits 3 with
+        BOOTSTRAP-NEEDS-COMPLEXITY; assess it with the creator rubric and pass
+        --assess PRD=SCORE:FACTORS. --out freezes the decision as bootstrap JSON
   assign "TEXT" [--config-dir DIR] [--write]         read role/model/effort out of a sentence
         role words: executor|worker|implementer|builder, reviewer|review|critic
         prints one ASSIGN line per role; --write updates .linchpin.toml in place
@@ -3103,6 +3313,7 @@ case "$command_name" in
   mode) [ "$#" -ge 2 ] || die 'usage: linchpin.sh mode EXECUTION PRD...'; mode_selection "$@" ;;
   schedule) [ "$#" -ge 3 ] || die 'usage: linchpin.sh schedule EXECUTION WORKTREE_STATUS LANE...'; schedule "$@" ;;
   gate) [ "$#" -eq 2 ] || die 'usage: linchpin.sh gate PRD REPORT'; gate_evidence "$1" "$2" ;;
+  audit) [ "$#" -ge 1 ] || die 'usage: linchpin.sh audit PRD... [--mode on|off|auto] [--assess PRD=SCORE:FACTORS] [--out PATH] [--config-dir DIR]'; audit_decision "$@" ;;
   preflight) [ "$#" -le 1 ] || die 'usage: linchpin.sh preflight [models_cache.json]'; preflight_model "${1:-}" ;;
   *) usage >&2; exit 1 ;;
 esac
