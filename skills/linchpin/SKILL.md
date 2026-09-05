@@ -32,10 +32,21 @@ machine-checkable preflight, contract, and mode decisions.
 | `ROUTE-EXECUTE-CONFORMING` | "run/execute/start/begin/launch/resume" | every supplied PRD path exists | `prd-swarm-coordinator` |
 | `ROUTE-EXECUTE-UPGRADE` | user explicitly asks to standardize a PRD | any | `migrate`, then `prd-creator` upgrade mode |
 | `ROUTE-EXECUTE-NONE` | "run/execute/start" | no PRD supplied, or a supplied path is not on disk | ask once for the PRD path |
+| `ROUTE-ASSIGN-MODELS` | request names a model, a role assignment, or an effort | any | `assign --write` against the target repository, **before** the execution route |
 | `ROUTE-AMBIGUOUS` | intent cannot be classified | any | ask one short question; never guess |
 
 ## Dispatch procedure
 
+0. If the request names a model, a role, or an effort — *"use Astra medium as
+   reviewer and Opus 5 medium as executor"* — run
+   `scripts/linchpin.sh assign "<the user's words>" --config-dir <target-repo> --write`
+   first, and announce the `ASSIGN` lines it printed. Do not translate the
+   sentence into config keys yourself: an improvised mapping is the thing this
+   plugin does not accept anywhere else, and `assign` refuses a model that
+   verifies on no provider instead of quietly substituting one. `ASSIGN-NONE`
+   at exit `0` means the request assigned nothing, so running it is always safe.
+   Assignment is not a route: the request still takes whichever execution or
+   authoring route it was always going to take.
 1. Run `scripts/linchpin.sh route "<intent>" <prd-path>...` **before** you plan
    or announce anything. `start`, `begin`, `launch`, and `resume` are execution
    verbs. A request naming PRDs that already exist is never an authoring

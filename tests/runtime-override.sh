@@ -10,10 +10,10 @@ mkdir -p "$config_dir"
 pinned_field() {
   awk -F '|' -v role="$1" -v column="$2" '$2 ~ role { value = $column; gsub(/`/, "", value); gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); print value; exit }' "$repo_root/references/runtime.md"
 }
-pinned_worker_model=$(pinned_field Worker 3)
-pinned_worker_effort=$(pinned_field Worker 4)
-pinned_reviewer_model=$(pinned_field Reviewer 3)
-pinned_reviewer_effort=$(pinned_field Reviewer 4)
+pinned_worker_model=$(pinned_field Worker 4)
+pinned_worker_effort=$(pinned_field Worker 5)
+pinned_reviewer_model=$(pinned_field Reviewer 4)
+pinned_reviewer_effort=$(pinned_field Reviewer 5)
 
 # Zero-config keeps every shipped pin exactly as it is.
 default_values=$(sh "$repo_root/scripts/linchpin.sh" config "$config_dir")
@@ -66,6 +66,41 @@ done
 printf '%s\n' 'reviewer_effort = "turbo"' > "$config_dir/.linchpin.toml"
 expect_failure 'unrecognized effort value' \
   sh "$repo_root/scripts/linchpin.sh" config "$config_dir"
+
+# The provider travels with the alias, so one run can cross providers. Both
+# shapes have to come out right, in one brief, from one config.
+printf '%s\n' 'worker = "opus-5"' 'worker_effort = "high"' \
+  'reviewer = "sol"' 'reviewer_effort = "high"' > "$config_dir/.linchpin.toml"
+cross_brief="$tmp_dir/cross-provider.brief"
+sh "$repo_root/scripts/linchpin.sh" brief "$fixture" lane-1 parallel pr \
+  --config-dir "$config_dir" --out "$cross_brief" >/dev/null
+cross_text=$(cat "$cross_brief")
+assert_contains "$cross_text" 'Worker provider: claude'
+assert_contains "$cross_text" 'Reviewer provider: codex'
+assert_contains "$cross_text" 'claude -p --permission-mode bypassPermissions --model claude-opus-5 --effort high'
+assert_contains "$cross_text" "codex exec --model gpt-5.6-sol -c 'model_reasoning_effort=\"high\"' --sandbox read-only"
+sh "$repo_root/scripts/linchpin.sh" brief-check "$fixture" "$cross_brief" --config-dir "$config_dir" >/dev/null
+
+# The effort domain belongs to the provider. `xhigh` is a Claude Code word and
+# codex has no such level, so one shared list would be wrong in one direction or
+# the other whichever way it was written.
+printf '%s\n' 'worker = "opus-5"' 'worker_effort = "xhigh"' > "$config_dir/.linchpin.toml"
+sh "$repo_root/scripts/linchpin.sh" config "$config_dir" >/dev/null
+printf '%s\n' 'worker = "luna"' 'worker_effort = "xhigh"' > "$config_dir/.linchpin.toml"
+expect_failure 'xhigh asked of a codex worker' \
+  sh "$repo_root/scripts/linchpin.sh" config "$config_dir"
+printf '%s\n' 'worker_effort = "xhigh"' > "$config_dir/.linchpin.toml"
+expect_failure 'xhigh against the shipped codex worker pin' \
+  sh "$repo_root/scripts/linchpin.sh" config "$config_dir"
+
+# The config surface stays alias-only for both providers. Dynamic resolution of
+# an unlisted model happens in `assign`, which verifies it first; a raw slug
+# typed into the config is still the pin that goes stale.
+for raw_claude_slug in 'claude-opus-5' 'claude-sonnet-5' 'opus' 'sonnet'; do
+  printf '%s\n' "worker = \"$raw_claude_slug\"" > "$config_dir/.linchpin.toml"
+  expect_failure "raw claude slug or floating alias in the config: $raw_claude_slug" \
+    sh "$repo_root/scripts/linchpin.sh" config "$config_dir"
+done
 
 # Preflight refuses before any branch exists, so a config error must surface
 # there. Swallowing it produces a PASS that names a model the config never asked

@@ -1,7 +1,7 @@
 {
   "name": "linchpin",
-  "version": "0.10.0",
-  "description": "Codex-only PRD swarm orchestration with contract-preserving intake.",
+  "version": "0.11.0",
+  "description": "Multi-provider PRD swarm orchestration with contract-preserving intake.",
   "author": {
     "name": "Linchpin contributors",
     "url": "https://github.com/jonit-dev/linchpin"
@@ -10,6 +10,7 @@
   "license": "MIT",
   "keywords": [
     "codex",
+    "claude",
     "prd",
     "swarm",
     "orchestration"

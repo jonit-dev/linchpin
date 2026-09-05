@@ -17,10 +17,18 @@ by the verification tests.
 | `ROUTE-EXECUTE-CONFORMING` | "run/execute/start/begin/launch/resume" | every supplied PRD path exists | `prd-swarm-coordinator` |
 | `ROUTE-EXECUTE-UPGRADE` | user explicitly asks to standardize a PRD | any | `migrate`, then `prd-creator` upgrade mode |
 | `ROUTE-EXECUTE-NONE` | "run/execute/start" | no PRD supplied, or a supplied path is not on disk | ask once for the PRD path |
+| `ROUTE-ASSIGN-MODELS` | request names a model, a role assignment, or an effort | any | `assign --write` against the target repository, **before** the execution route |
 | `ROUTE-AMBIGUOUS` | intent cannot be classified | any | ask one short question; never guess |
 
 Intent wins over repository state: three conforming files on disk do not change
 `ROUTE-WRITE-PRD` into an execution route.
+
+`ROUTE-ASSIGN-MODELS` is not an execution route and never replaces one. It runs
+first, announces what it resolved, and then the request takes whichever route it
+was always going to take: *"use Astra as reviewer and run PRD-007"* is an
+execute intent that happens to reconfigure two keys on the way in. `route`
+prints the `ROUTE-ASSIGN-MODELS` line beside the execution route when it sees an
+assignment, so a manager does not have to notice one by reading.
 
 `start`, `begin`, `launch`, and `resume` are execution verbs, not authoring
 verbs. "start PRD 007 to 010" names artifacts the user already wrote, so it takes
@@ -120,10 +128,10 @@ base = "auto"         # auto = repository default branch
 review = true         # false is accepted only when explicitly typed
 max_lanes = 4
 prd_floor = 3
-worker = ""           # "" = use the runtime.md pin; luna | sol | terra
-worker_effort = ""    # "" = use the runtime.md pin; low | medium | high | max
-reviewer = ""         # "" = use the runtime.md pin; luna | sol | terra
-reviewer_effort = ""  # "" = use the runtime.md pin; low | medium | high | max
+worker = ""           # "" = use the runtime.md pin; an alias, see below
+worker_effort = ""    # "" = use the runtime.md pin; the provider's domain
+reviewer = ""         # "" = use the runtime.md pin; an alias, see below
+reviewer_effort = ""  # "" = use the runtime.md pin; the provider's domain
 ```
 
 These four keys are how a repository changes which model runs a role, and at
@@ -136,20 +144,75 @@ configuration validation rather than reaching a `codex exec` once per lane.
 appears, so adding a model is one edit. An alias with no row is a configuration
 failure, not a model request that reaches the API.
 
-Preflight then verifies both resolved models against the local cache before any
-branch exists. A configured model missing from the cache is a hard refusal with
+**The provider travels with the alias.** There is no provider key to keep in
+sync: naming a claude alias as the worker is what makes that role a Claude Code
+role, and each role resolves independently, so one run can put a `claude -p`
+worker beside a `codex exec --sandbox read-only` reviewer.
+
+| Provider | Aliases | Effort domain |
+|---|---|---|
+| `codex` | `luna`, `sol`, `terra`, `astra` | `low` `medium` `high` `max` |
+| `claude` | `opus-5`, `opus-4.8`, `sonnet-5`, `haiku-4.5`, `fable-5.1` | `low` `medium` `high` `xhigh` `max` |
+
+`worker_effort` and `reviewer_effort` are validated against the domain of the
+provider that role resolved to, so `xhigh` is accepted for a claude role and
+refused for a codex one. Validating both against one shared list would either
+reject a word Claude Code accepts or pass one codex rejects once per lane.
+
+Preflight then verifies every resolved role before any branch exists: a codex
+role against the local capability cache, a claude role with one live
+`--max-turns 1` probe per distinct model. Either failing is a hard refusal with
 no fallback, exactly as a missing default would be.
 
-Unknown keys and invalid values fail configuration validation. Natural-language
-overrides are written to this file before scheduling so the conversational and
-file paths converge. `delivery = "pr"` degrades to `branch` when a remote or
-the required PR client is unavailable, with an announcement. `review = false`
-is never inferred from a missing service.
+### `.linchpin-models.toml`
+
+The shipped alias table is the verified floor, not the ceiling. A user naming a
+model that has no row is a normal request, and
+`scripts/linchpin.sh assign` resolves it live — a cache lookup for codex, one
+probe for claude — then records it in `.linchpin-models.toml` beside
+`.linchpin.toml`:
+
+```toml
+gpt-6-astra = "codex:gpt-6-astra"
+claude-opus-4-8 = "claude:claude-opus-4-8"
+```
+
+Rows are `<alias> = "<provider>:<slug>"`. A shipped row always wins over a
+repo-local row of the same name, so a repository cannot redefine a verified
+alias out from under a run. The file lives in the target repository because the
+plugin is overwritten on upgrade. A name that verifies on neither provider is
+refused by name; it is never guessed at and never replaced with a fallback.
+
+### Assignment from a sentence
+
+`scripts/linchpin.sh assign "<text>" [--config-dir DIR] [--write]` is the whole
+mapping from prose to configuration, so no manager has to improvise it:
+
+- role words: `executor`, `worker`, `implementer`, `builder` → `worker`;
+  `reviewer`, `review`, `critic` → `reviewer`;
+- model terms are case-folded with spaces and dots turned into hyphens, then
+  matched against alias names and slugs, so "Opus 5" and "opus-5" are one term;
+- effort words are the union of both domains, checked against the domain of the
+  provider that role resolved to;
+- output is one `ASSIGN role=… alias=… effort=… provider=… model=…` line per
+  role. `--write` updates `worker`, `worker_effort`, `reviewer`, and
+  `reviewer_effort` in `.linchpin.toml`, preserving every other key and creating
+  the file when absent; without it `assign` only prints;
+- text naming no assignment prints `ASSIGN-NONE` and exits `0`, so a caller may
+  run it unconditionally;
+- a model term that verifies on neither provider prints `ASSIGN-UNRESOLVED
+  <term>` and exits non-zero.
+
+Unknown keys and invalid values fail configuration validation.
+`delivery = "pr"` degrades to `branch` when a remote or the required PR client
+is unavailable, with an announcement. `review = false` is never inferred from a
+missing service.
 
 The helper resolves `.linchpin.toml` from the target repository directory. For
 isolated helper tests or an explicitly supplied target, set
 `LINCHPIN_CONFIG_DIR=/path/to/repo` or pass `--config-dir /path/to/repo` to
-`route`, `mode`, `schedule`, `brief`, or `brief-check`. A brief and its check
+`route`, `mode`, `schedule`, `brief`, `brief-check`, `review-brief`, or
+`assign`. A brief and its check
 must resolve the same config, or the check reads a stale runtime pin and
 rejects a brief that is correct. The file remains optional.
 

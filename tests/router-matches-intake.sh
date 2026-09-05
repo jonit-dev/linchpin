@@ -3,6 +3,14 @@
 
 intake_ids=$(grep -oE 'ROUTE-[A-Z-]+' "$repo_root/references/intake.md" | sort -u)
 router_ids=$(grep -oE 'ROUTE-[A-Z-]+' "$repo_root/skills/linchpin/SKILL.md" | sort -u)
+# Parity of two empty sets is also parity. Name the routes that must exist, so a
+# route dropped from both files fails here instead of passing quietly.
+for required_route in ROUTE-WRITE-PRD ROUTE-BUILD-SMALL ROUTE-BUILD-LARGE \
+                      ROUTE-EXECUTE-CONFORMING ROUTE-EXECUTE-UPGRADE \
+                      ROUTE-EXECUTE-NONE ROUTE-ASSIGN-MODELS ROUTE-AMBIGUOUS; do
+  assert_contains "$intake_ids" "$required_route"
+  assert_contains "$router_ids" "$required_route"
+done
 printf '%s\n' "$intake_ids" > "$tmp_dir/intake-ids"
 printf '%s\n' "$router_ids" > "$tmp_dir/router-ids"
 cmp -s "$tmp_dir/intake-ids" "$tmp_dir/router-ids" || fail 'router route ids drift from intake'

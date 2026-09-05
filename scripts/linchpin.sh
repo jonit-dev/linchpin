@@ -54,12 +54,19 @@ runtime_value() {
   ' "$runtime_reference"
 }
 
-alias_model() {
-  # Resolves an alias from the Model aliases table in runtime.md. Empty output
-  # means the alias has no row, which is a configuration failure, not a model
-  # request to pass along. Scoped to that one table: the Role pins table has the
-  # same column shape, so an unscoped scan would let `worker = "Manager"` resolve
-  # to a real model that the alias allowlist was supposed to reject.
+models_local_file() {
+  # The repo-local alias table. `assign` mints a row here when it verifies a
+  # model the shipped table does not list, so a name the user typed is still
+  # referred to by alias everywhere downstream. It lives in the target
+  # repository, not in the plugin, because the plugin is overwritten on upgrade.
+  printf '%s/.linchpin-models.toml\n' "${models_config_dir:-${LINCHPIN_CONFIG_DIR:-$PWD}}"
+}
+
+resolve_shipped_alias() {
+  # The Model aliases table in runtime.md. Scoped to that one table: the Role
+  # pins table has the same column shape, so an unscoped scan would let
+  # `worker = "Manager"` resolve to a real model that the alias allowlist was
+  # supposed to reject.
   awk -F '|' -v target="$1" '
     /^## / { in_table = ($0 ~ /^## Model aliases/); next }
     !in_table { next }
@@ -67,54 +74,214 @@ alias_model() {
       name = $2
       gsub(/`/, "", name)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
-      if (name == target) {
-        value = $3
-        gsub(/`/, "", value)
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-        if (value ~ /^gpt-/) { print value; exit }
-      }
+      if (name != target) next
+      provider = $3
+      slug = $4
+      gsub(/`/, "", provider)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", provider)
+      gsub(/`/, "", slug)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", slug)
+      # A provider cell has no default. A row that lost it must fail to resolve
+      # rather than quietly fall back to whichever provider shipped first.
+      if (provider != "codex" && provider != "claude") exit
+      if (slug !~ /^(gpt-|codex-|claude-)/) exit
+      printf "%s\t%s\n", provider, slug
+      exit
     }
   ' "$runtime_reference"
 }
 
+resolve_local_alias() {
+  # `<alias> = "<provider>:<slug>"`, one per line. The key may be quoted: a bare
+  # TOML key cannot hold the dot in a name like `opus-4.8`.
+  [ -f "$2" ] || return 0
+  awk -v target="$1" '
+    { sub(/[[:space:]]*#.*$/, "") }
+    !/=/ { next }
+    {
+      key = $0
+      sub(/=.*$/, "", key)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      gsub(/^"|"$/, "", key)
+      gsub(/^'"'"'|'"'"'$/, "", key)
+      if (key != target) next
+      value = $0
+      sub(/^[^=]*=/, "", value)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      gsub(/^"|"$/, "", value)
+      gsub(/^'"'"'|'"'"'$/, "", value)
+      split(value, parts, ":")
+      provider = parts[1]
+      slug = parts[2]
+      if (provider != "codex" && provider != "claude") exit
+      if (slug !~ /^(gpt-|codex-|claude-)/) exit
+      printf "%s\t%s\n", provider, slug
+      exit
+    }
+  ' "$2"
+}
+
+resolve_model() {
+  # Prints `provider<TAB>slug`. Empty output means the name has no row, which is
+  # a configuration failure rather than a model request to pass along — the same
+  # signal the single-provider resolver used, so every caller keeps its refusal.
+  # The shipped table is read first and always wins: a repo-local row must not
+  # redefine a verified name out from under a run.
+  resolve_row=$(resolve_shipped_alias "$1")
+  [ -n "$resolve_row" ] || resolve_row=$(resolve_local_alias "$1" "$(models_local_file)")
+  [ -z "$resolve_row" ] || printf '%s\n' "$resolve_row"
+}
+
+resolve_field() {
+  # 1 = provider, 2 = slug, out of a `provider<TAB>slug` row.
+  printf '%s\n' "$1" | cut -f"$2"
+}
+
+provider_cell() {
+  # One cell of the Provider mechanisms table: the row labelled "$1", in the
+  # column for provider "$2". This table is the only place the four accepted
+  # mechanism strings and the two effort domains are written down.
+  awk -F '|' -v label="$1" -v provider="$2" '
+    /^## / { in_table = ($0 ~ /^## Provider mechanisms/); next }
+    !in_table { next }
+    {
+      name = $2
+      gsub(/`/, "", name)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+      if (name != label) next
+      column = (provider == "claude") ? 4 : 3
+      value = $column
+      gsub(/`/, "", value)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      print value
+      exit
+    }
+  ' "$runtime_reference"
+}
+
+effort_domain() {
+  provider_cell 'Effort domain' "$1"
+}
+
+runtime_mechanisms_valid() {
+  # Four cells, one per provider per role, and none of them missing. The check
+  # that earns its keep is the one a plausible edit actually produces: a worker
+  # mechanism that is really a reviewer's. That reads as a hardening improvement
+  # and ends every lane PARTIAL, because a read-only worker cannot commit.
+  for mechanism_provider in codex claude; do
+    for mechanism_role in Worker Reviewer; do
+      [ -n "$(provider_cell "$mechanism_role mechanism" "$mechanism_provider")" ] ||
+        die "references/runtime.md Provider mechanisms has no $mechanism_provider $mechanism_role mechanism"
+    done
+    [ -n "$(effort_domain "$mechanism_provider")" ] ||
+      die "references/runtime.md Provider mechanisms has no $mechanism_provider effort domain"
+    # The access flag is the whole reason a worker mechanism is not just a
+    # launcher name. A codex worker under the default sandbox cannot write the
+    # worktree's git metadata and so cannot commit; a claude worker that has to
+    # ask before each write cannot run unattended. Both end the lane PARTIAL
+    # after the worker time is spent, so a mechanism cell that lost its flag is
+    # refused here.
+    mechanism_write=$(provider_cell 'Write access' "$mechanism_provider")
+    mechanism_read=$(provider_cell 'Read-only access' "$mechanism_provider")
+    [ -n "$mechanism_write" ] ||
+      die "references/runtime.md Provider mechanisms has no $mechanism_provider write access flag"
+    [ -n "$mechanism_read" ] ||
+      die "references/runtime.md Provider mechanisms has no $mechanism_provider read-only access flag"
+    mechanism_worker=$(provider_cell 'Worker mechanism' "$mechanism_provider")
+    case "$mechanism_worker" in
+      *"$mechanism_write"*) ;;
+      *) die "references/runtime.md $mechanism_provider Worker mechanism does not carry its write access flag ($mechanism_write); that worker cannot commit and every lane ends PARTIAL" ;;
+    esac
+    case "$mechanism_worker" in
+      *"$mechanism_read"*) die "references/runtime.md $mechanism_provider Worker mechanism carries the read-only access flag ($mechanism_read); that worker cannot commit and every lane ends PARTIAL" ;;
+    esac
+    case "$(provider_cell 'Reviewer mechanism' "$mechanism_provider")" in
+      *"$mechanism_read"*) ;;
+      *) die "references/runtime.md $mechanism_provider Reviewer mechanism does not carry its read-only access flag ($mechanism_read); a reviewer that can edit what it judges is not a review" ;;
+    esac
+  done
+  for mechanism_provider in codex claude; do
+    mechanism_worker=$(provider_cell 'Worker mechanism' "$mechanism_provider")
+    for mechanism_other in codex claude; do
+      [ "$mechanism_worker" != "$(provider_cell 'Reviewer mechanism' "$mechanism_other")" ] ||
+        die "references/runtime.md gives the $mechanism_provider Worker the $mechanism_other Reviewer mechanism; a worker that cannot write ends every lane PARTIAL"
+    done
+  done
+}
+
+role_invocation() {
+  # ROLE PROVIDER MECHANISM MODEL EFFORT. The shape is decided by the provider,
+  # never by the manager: codex takes its lane with -C and its prompt as an
+  # argument, claude takes the lane as its cwd and its prompt on stdin.
+  case "$2:$1" in
+    codex:worker)
+      printf "%s --model %s -c 'model_reasoning_effort=\"%s\"' -C <lane> <brief>\n" "$3" "$4" "$5" ;;
+    codex:reviewer)
+      printf "codex exec --model %s -c 'model_reasoning_effort=\"%s\"' --sandbox read-only -C <lane> <review>\n" "$4" "$5" ;;
+    claude:worker)
+      printf '%s --model %s --effort %s --session-id <session> [cwd=<lane>, brief on stdin]\n' "$3" "$4" "$5" ;;
+    claude:reviewer)
+      printf '%s --model %s --effort %s --session-id <session> [cwd=<lane>, review on stdin]\n' "$3" "$4" "$5" ;;
+    *) die "no invocation shape for provider '$2' in role '$1'" ;;
+  esac
+}
+
 runtime_metadata() {
   require_file "$runtime_reference"
-  worker_model=$(runtime_value Worker 3)
-  worker_effort=$(runtime_value Worker 4)
-  worker_mechanism=$(runtime_value Worker 5)
-  reviewer_model=$(runtime_value Reviewer 3)
-  reviewer_effort=$(runtime_value Reviewer 4)
-  reviewer_mechanism=$(runtime_value Reviewer 5)
+  runtime_mechanisms_valid
+  worker_provider=$(runtime_value Worker 3)
+  worker_model=$(runtime_value Worker 4)
+  worker_effort=$(runtime_value Worker 5)
+  worker_mechanism_pin=$(runtime_value Worker 6)
+  reviewer_provider=$(runtime_value Reviewer 3)
+  reviewer_model=$(runtime_value Reviewer 4)
+  reviewer_effort=$(runtime_value Reviewer 5)
+  reviewer_mechanism_pin=$(runtime_value Reviewer 6)
+  [ -n "$worker_provider" ] || die 'runtime.md has no Worker provider pin'
+  [ -n "$reviewer_provider" ] || die 'runtime.md has no Reviewer provider pin'
+  # The mechanism a role carries is derived from its provider, not copied by
+  # hand. The Role pins cell still has to agree with the provider it names, or
+  # the table describes a role nothing can launch. The worker mechanism carries
+  # its write access for the reason runtime.md records: under codex's default
+  # workspace-write sandbox a worker cannot write the worktree's git metadata,
+  # so it cannot commit, and cannot bind the unix socket its own toolchain
+  # needs; a claude worker that has to ask before each write cannot run
+  # unattended. Both were reproduced.
+  [ "$worker_mechanism_pin" = "$(provider_cell 'Worker mechanism' "$worker_provider")" ] ||
+    die "runtime.md Worker mechanism is not the $worker_provider Worker mechanism"
+  [ "$reviewer_mechanism_pin" = "$(provider_cell 'Reviewer mechanism' "$reviewer_provider")" ] ||
+    die "runtime.md Reviewer mechanism is not the $reviewer_provider Reviewer mechanism"
   # A repo-local effort override, declared before the run starts, is the user's
   # call. It is not the forbidden thing: what the delegation rules prohibit is
   # the MANAGER changing tier mid-run to get past a gate that failed. The model
-  # itself stays pinned — preflight verifies the worker model's capability, and
+  # itself stays pinned — preflight verifies each resolved role, and
   # substituting one is how a run silently stops being the run that was checked.
   [ -z "${cfg_worker_effort:-}" ] || worker_effort="$cfg_worker_effort"
   [ -z "${cfg_reviewer_effort:-}" ] || reviewer_effort="$cfg_reviewer_effort"
   if [ -n "${cfg_worker_model:-}" ]; then
-    worker_model=$(alias_model "$cfg_worker_model")
-    [ -n "$worker_model" ] || die "unknown worker alias: $cfg_worker_model (see the Model aliases table in references/runtime.md)"
+    runtime_row=$(resolve_model "$cfg_worker_model")
+    [ -n "$runtime_row" ] || die "unknown worker alias: $cfg_worker_model (see the Model aliases table in references/runtime.md)"
+    worker_provider=$(resolve_field "$runtime_row" 1)
+    worker_model=$(resolve_field "$runtime_row" 2)
   fi
   if [ -n "${cfg_reviewer_model:-}" ]; then
-    reviewer_model=$(alias_model "$cfg_reviewer_model")
-    [ -n "$reviewer_model" ] || die "unknown reviewer alias: $cfg_reviewer_model (see the Model aliases table in references/runtime.md)"
+    runtime_row=$(resolve_model "$cfg_reviewer_model")
+    [ -n "$runtime_row" ] || die "unknown reviewer alias: $cfg_reviewer_model (see the Model aliases table in references/runtime.md)"
+    reviewer_provider=$(resolve_field "$runtime_row" 1)
+    reviewer_model=$(resolve_field "$runtime_row" 2)
   fi
   [ -n "$worker_model" ] || die 'runtime.md has no Worker model pin'
   [ -n "$worker_effort" ] || die 'runtime.md has no Worker effort pin'
-  # The worker mechanism carries its sandbox flag for the reason runtime.md
-  # records: under the default workspace-write sandbox a worker cannot write the
-  # worktree's git metadata, so it cannot commit, and cannot bind the unix socket
-  # its own toolchain needs. Both were reproduced. A mechanism cell missing the
-  # flag is a lane that will report PARTIAL after the worker time is spent.
-  [ "$worker_mechanism" = 'codex exec --sandbox danger-full-access' ] || die 'runtime.md Worker mechanism is not codex exec --sandbox danger-full-access'
   [ -n "$reviewer_model" ] || die 'runtime.md has no Reviewer model pin'
   [ -n "$reviewer_effort" ] || die 'runtime.md has no Reviewer effort pin'
-  [ "$reviewer_mechanism" = 'codex exec --sandbox read-only' ] || die 'runtime.md Reviewer mechanism is not read-only codex exec'
+  worker_mechanism=$(provider_cell 'Worker mechanism' "$worker_provider")
+  reviewer_mechanism=$(provider_cell 'Reviewer mechanism' "$reviewer_provider")
+  [ -n "$worker_mechanism" ] || die "no Worker mechanism for provider: $worker_provider"
+  [ -n "$reviewer_mechanism" ] || die "no Reviewer mechanism for provider: $reviewer_provider"
   worker_runtime="model=$worker_model; effort=$worker_effort; mechanism=$worker_mechanism"
   reviewer_runtime="model=$reviewer_model; effort=$reviewer_effort; mechanism=$reviewer_mechanism"
-  worker_invocation="$worker_mechanism --model $worker_model -c 'model_reasoning_effort=\"$worker_effort\"' -C <lane> <brief>"
-  reviewer_invocation="codex exec --model $reviewer_model -c 'model_reasoning_effort=\"$reviewer_effort\"' --sandbox read-only -C <lane> <review>"
+  worker_invocation=$(role_invocation worker "$worker_provider" "$worker_mechanism" "$worker_model" "$worker_effort")
+  reviewer_invocation=$(role_invocation reviewer "$reviewer_provider" "$reviewer_mechanism" "$reviewer_model" "$reviewer_effort")
 }
 
 marker_is_valid() {
@@ -667,6 +834,9 @@ config_directory() {
 
 load_config() {
   config_dir=$(config_directory "${1:-}")
+  # `resolve_model` reads the repo-local alias table out of this directory, and
+  # it is reached from runtime_metadata as well as from here. Record it once.
+  models_config_dir="$config_dir"
   resolved_config=$(config_values "$config_dir")
   while IFS='=' read -r config_key config_value; do
     case "$config_key" in
@@ -862,6 +1032,8 @@ brief_emit() {
   printf '%s\n' '' '## Checkpoint Protocol (verbatim)'
   brief_section "$prd" 'Checkpoint [Pp]rotocol'
   printf '%s\n' '' '## Resolved Lane Metadata'
+  printf 'Worker provider: %s\n' "$worker_provider"
+  printf 'Reviewer provider: %s\n' "$reviewer_provider"
   printf 'Worker runtime: %s\n' "$worker_runtime"
   printf 'Reviewer runtime: %s\n' "$reviewer_runtime"
   printf 'Runtime invocation: worker=%s; reviewer=%s\n' "$worker_invocation" "$reviewer_invocation"
@@ -888,6 +1060,7 @@ review_round_cap=2
 review_brief() {
   prd=''
   lane_id=''
+  review_config_dir=''
   commit_sha=''
   gates_file=''
   brief_out=''
@@ -902,6 +1075,8 @@ review_brief() {
       --ledger) [ "$#" -ge 2 ] || die 'review-brief --ledger needs a path'; ledger_file="$2"; shift 2 ;;
       --ledger=*) ledger_file="${1#--ledger=}"; shift ;;
       --round) [ "$#" -ge 2 ] || die 'review-brief --round needs a number'; round_requested="$2"; shift 2 ;;
+      --config-dir) [ "$#" -ge 2 ] || die 'review-brief --config-dir needs a path'; review_config_dir="$2"; shift 2 ;;
+      --config-dir=*) review_config_dir="${1#--config-dir=}"; shift ;;
       *)
         positional_count=$((positional_count + 1))
         case "$positional_count" in
@@ -959,6 +1134,11 @@ review_brief() {
       --set review_rounds="$round_next" --set review_used=true >/dev/null ) ||
     die "review-brief could not record round $round_next in $ledger_file: fix the lane row first"
 
+  # The packet names the providers that ran the lane, so it has to resolve the
+  # same config the worker brief did.
+  load_config "$review_config_dir"
+  runtime_metadata
+
   if [ -n "$brief_out" ]; then
     review_brief_emit "$prd" "$lane_id" "$commit_sha" "$gates_file" > "$brief_out"
     printf 'REVIEW-BRIEF-WRITTEN %s round=%s/%s\n' "$brief_out" "$round_next" "$review_round_cap"
@@ -976,6 +1156,8 @@ review_brief_emit() {
   printf 'Source PRD: %s\n' "$prd"
   printf 'Lane identity: %s\n' "$lane_id"
   printf 'Lane commit under review: %s\n' "$commit_sha"
+  printf 'Worker provider: %s\n' "$worker_provider"
+  printf 'Reviewer provider: %s\n' "$reviewer_provider"
   printf '%s\n' '' '## Acceptance Criteria (verbatim)'
   brief_section "$prd" 'Acceptance Criteria' 'Acceptance'
   printf '%s\n' '' '## Negative Controls (verbatim)'
@@ -1029,10 +1211,12 @@ brief_check() {
   [ "$metadata_count" -eq 1 ] || die 'worker brief delivery mode is missing or duplicated'
   metadata_count=$(grep -Ec '^Delivery mode: (pr|branch)$' "$brief_file" || true)
   [ "$metadata_count" -eq 1 ] || die 'worker brief delivery mode is malformed'
-  for metadata_prefix in 'Worker runtime:' 'Reviewer runtime:' 'Runtime invocation:' 'Prohibited actions:' 'Scope rule:' 'Source rule:' 'Commit rule:' 'Commit rule exception:' 'Environment rule:'; do
+  for metadata_prefix in 'Worker provider:' 'Reviewer provider:' 'Worker runtime:' 'Reviewer runtime:' 'Runtime invocation:' 'Prohibited actions:' 'Scope rule:' 'Source rule:' 'Commit rule:' 'Commit rule exception:' 'Environment rule:'; do
     metadata_count=$(grep -Fc "$metadata_prefix" "$brief_file" || true)
     [ "$metadata_count" -eq 1 ] || die "worker brief metadata is missing or duplicated: $metadata_prefix"
   done
+  require_exact_line "Worker provider: $worker_provider" "$brief_file" || die 'worker brief Worker provider metadata is missing or stale'
+  require_exact_line "Reviewer provider: $reviewer_provider" "$brief_file" || die 'worker brief Reviewer provider metadata is missing or stale'
   require_exact_line "Worker runtime: $worker_runtime" "$brief_file" || die 'worker brief Worker runtime metadata is missing or stale'
   require_exact_line "Reviewer runtime: $reviewer_runtime" "$brief_file" || die 'worker brief Reviewer runtime metadata is missing or stale'
   require_exact_line "Runtime invocation: worker=$worker_invocation; reviewer=$reviewer_invocation" "$brief_file" || die 'worker brief runtime invocation is missing or stale'
@@ -1059,6 +1243,7 @@ brief_check() {
 
 config_values() {
   config_dir=$(config_directory "${1:-}")
+  models_config_dir="$config_dir"
   config_file="$config_dir/.linchpin.toml"
   execution=auto
   delivery=pr
@@ -1103,24 +1288,39 @@ config_values() {
   case "$review" in true|false) ;; *) die "review must be true or false" ;; esac
   case "$max_lanes" in *[!0-9]*|0|"") die "max_lanes must be a positive integer" ;; esac
   case "$prd_floor" in *[!0-9]*|"") die "prd_floor must be a non-negative integer" ;; esac
-  # An unrecognized effort must fail here rather than reach a `codex exec` that
-  # rejects it once per lane, after the run is already underway.
-  case "$worker_effort_override" in
-    ''|low|medium|high|max) ;;
-    *) die "worker_effort must be low, medium, high, or max: $worker_effort_override" ;;
-  esac
-  case "$reviewer_effort_override" in
-    ''|low|medium|high|max) ;;
-    *) die "reviewer_effort must be low, medium, high, or max: $reviewer_effort_override" ;;
-  esac
   # Validate the alias against the table that actually resolves it, so adding a
-  # model to runtime.md is one edit rather than two that can disagree.
+  # model to runtime.md is one edit rather than two that can disagree. The
+  # effort domain then belongs to the provider that alias names, not to
+  # linchpin: codex has no `xhigh` and Claude Code does, so one shared list
+  # either rejects a word Claude accepts or passes one codex rejects once per
+  # lane, after the run is already underway.
   for role_pair in "worker=$worker_override" "reviewer=$reviewer_override"; do
     role_name=${role_pair%%=*}
     role_alias=${role_pair#*=}
-    [ -n "$role_alias" ] || continue
-    [ -n "$(alias_model "$role_alias")" ] ||
-      die "$role_name must be an alias in the Model aliases table in references/runtime.md: $role_alias"
+    case "$role_name" in
+      worker) role_pin=Worker; role_effort="$worker_effort_override" ;;
+      *) role_pin=Reviewer; role_effort="$reviewer_effort_override" ;;
+    esac
+    if [ -n "$role_alias" ]; then
+      role_row=$(resolve_model "$role_alias")
+      [ -n "$role_row" ] ||
+        die "$role_name must be an alias in the Model aliases table in references/runtime.md: $role_alias"
+      role_provider=$(resolve_field "$role_row" 1)
+    else
+      role_provider=$(runtime_value "$role_pin" 3)
+      [ -n "$role_provider" ] ||
+        die "references/runtime.md has no $role_pin provider pin"
+    fi
+    [ -n "$role_effort" ] || continue
+    role_domain=$(effort_domain "$role_provider")
+    [ -n "$role_domain" ] ||
+      die "references/runtime.md declares no effort domain for provider: $role_provider"
+    role_effort_ok=no
+    for domain_word in $role_domain; do
+      if [ "$domain_word" = "$role_effort" ]; then role_effort_ok=yes; fi
+    done
+    [ "$role_effort_ok" = yes ] ||
+      die "${role_name}_effort must be one of: $role_domain (the $role_provider effort domain): $role_effort"
   done
   printf 'execution=%s\ndelivery=%s\nbase=%s\nreview=%s\nmax_lanes=%s\nprd_floor=%s\nworker=%s\nreviewer=%s\nworker_effort=%s\nreviewer_effort=%s\n' \
     "$execution" "$delivery" "$base" "$review" "$max_lanes" "$prd_floor" \
@@ -1129,6 +1329,29 @@ config_values() {
 }
 
 execute_intent='run|execute|start|begin|launch|resume|continue|kick off'
+
+route_announce_assignment() {
+  # A role word alone is not an assignment: "run the reviewer on PRD-007" names
+  # no model and no effort. Announce only when something actually resolves — an
+  # effort word, or a term that already has an alias row — so the advisory never
+  # points a manager at `assign` for a sentence assign would refuse.
+  models_config_dir="$2"
+  route_assignment=no
+  # A tab is IFS white space: `read` would collapse an empty effort field and
+  # shift the candidate list into it. The separator has to be one nothing in a
+  # role, alias, effort, provider, or slug can contain.
+  while IFS='|' read -r route_role route_effort route_candidates; do
+    [ -n "$route_role" ] || continue
+    if [ -n "$route_effort" ]; then route_assignment=yes; fi
+    for route_candidate in $route_candidates; do
+      if [ -n "$(assign_lookup "$route_candidate")" ]; then route_assignment=yes; fi
+    done
+  done <<ROUTE_ASSIGN_EOF
+$(assign_parse "$1")
+ROUTE_ASSIGN_EOF
+  [ "$route_assignment" = yes ] || return 0
+  printf '%s\n' 'ROUTE-ASSIGN-MODELS -> assign --write (run it before the execution route; it never replaces one)'
+}
 
 route() {
   intent=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
@@ -1166,6 +1389,11 @@ route() {
     esac
   done
   load_config "$config_dir"
+  # Assignment is not a route. It runs first, changes two config keys, and then
+  # the request takes whichever route it was always going to take: "use Astra as
+  # reviewer and run PRD-007" is an execute intent. Announcing it here is what
+  # keeps a manager from noticing the assignment by reading, or not at all.
+  route_announce_assignment "$intent" "$config_dir"
   if printf '%s' "$intent" | grep -Eq '(writ(e|ing)|draft(ing)?|author(ing)?|creat(e|ing))([[:space:]]+[a-z]+){0,3}[[:space:]]+prd'; then
     printf '%s\n' 'ROUTE-WRITE-PRD -> prd-creator'
     return
@@ -1518,58 +1746,479 @@ EOF
   printf 'GATES-PASS %s controls with exact observed-red evidence\n' "$actual"
 }
 
+assign_normalize() {
+  # Case-folded, with spaces and dots turned into hyphens, so "Opus 5",
+  # "opus-5" and "OPUS 5" are one term — and so is "Opus 4.8" against the
+  # `opus-4.8` row, because the alias name is normalized the same way.
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr ' .' '--' |
+    sed 's/--*/-/g; s/^-//; s/-$//'
+}
+
+assign_scan_shipped() {
+  awk -F '|' -v target="$1" '
+    function norm(v) {
+      v = tolower(v)
+      gsub(/[ .]/, "-", v)
+      gsub(/--+/, "-", v)
+      sub(/^-/, "", v)
+      sub(/-$/, "", v)
+      return v
+    }
+    /^## / { in_table = ($0 ~ /^## Model aliases/); next }
+    !in_table { next }
+    {
+      name = $2; provider = $3; slug = $4
+      gsub(/`/, "", name); gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+      gsub(/`/, "", provider); gsub(/^[[:space:]]+|[[:space:]]+$/, "", provider)
+      gsub(/`/, "", slug); gsub(/^[[:space:]]+|[[:space:]]+$/, "", slug)
+      if (name == "" || slug == "") next
+      if (provider != "codex" && provider != "claude") next
+      if (norm(name) != target && norm(slug) != target) next
+      printf "%s\t%s\t%s\n", name, provider, slug
+      exit
+    }
+  ' "$runtime_reference"
+}
+
+assign_scan_local() {
+  [ -f "$2" ] || return 0
+  awk -v target="$1" '
+    function norm(v) {
+      v = tolower(v)
+      gsub(/[ .]/, "-", v)
+      gsub(/--+/, "-", v)
+      sub(/^-/, "", v)
+      sub(/-$/, "", v)
+      return v
+    }
+    { sub(/[[:space:]]*#.*$/, "") }
+    !/=/ { next }
+    {
+      key = $0; sub(/=.*$/, "", key)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      gsub(/^"|"$/, "", key)
+      value = $0; sub(/^[^=]*=/, "", value)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      gsub(/^"|"$/, "", value)
+      split(value, parts, ":")
+      provider = parts[1]; slug = parts[2]
+      if (provider != "codex" && provider != "claude") next
+      if (slug !~ /^(gpt-|codex-|claude-)/) next
+      if (norm(key) != target && norm(slug) != target) next
+      printf "%s\t%s\t%s\n", key, provider, slug
+      exit
+    }
+  ' "$2"
+}
+
+assign_lookup() {
+  # A normalized term against every alias table, shipped first. Prints
+  # `alias<TAB>provider<TAB>slug`; empty output means no row matched.
+  assign_row=$(assign_scan_shipped "$1")
+  [ -n "$assign_row" ] || assign_row=$(assign_scan_local "$1" "$(models_local_file)")
+  [ -z "$assign_row" ] || printf '%s\n' "$assign_row"
+}
+
+assign_model_shaped() {
+  # A term worth spending a live verification on. A bare English word is not a
+  # model name, and probing one costs a request to learn nothing.
+  case "$1" in
+    gpt-*|codex-*|claude-*|o[0-9]*) return 0 ;;
+  esac
+  if printf '%s' "$1" | grep -Eq '[0-9]'; then
+    return 0
+  fi
+  return 1
+}
+
+assign_verify_live() {
+  # A name in no alias table is a normal request, not an error. Infer the
+  # provider from the name's shape, verify it the way that provider is verified
+  # — cache lookup for codex, one probe for claude — and print
+  # `provider<TAB>slug` only if it actually came back. Never a guess, never a
+  # fallback model.
+  assign_term="$1"
+  case "$assign_term" in
+    claude-*) assign_providers='claude' ;;
+    gpt-*|codex-*) assign_providers='codex' ;;
+    *) assign_providers='codex claude' ;;
+  esac
+  for assign_provider in $assign_providers; do
+    case "$assign_provider" in
+      codex)
+        assign_cache="${LINCHPIN_MODELS_CACHE:-${CODEX_HOME:-$HOME/.codex}/models_cache.json}"
+        [ -f "$assign_cache" ] || continue
+        command -v jq >/dev/null 2>&1 || continue
+        if jq -e --arg model "$assign_term" \
+          '[.. | objects | select(.slug? == $model)] | length > 0' "$assign_cache" >/dev/null 2>&1; then
+          printf 'codex\t%s\n' "$assign_term"
+          return 0
+        fi
+        ;;
+      claude)
+        assign_claude="${LINCHPIN_CLAUDE_BIN:-claude}"
+        command -v "$assign_claude" >/dev/null 2>&1 || continue
+        assign_probe=$("$assign_claude" -p --model "$assign_term" --effort low --max-turns 1 \
+          'Reply with the single word ok.' < /dev/null 2>/dev/null) || continue
+        if [ -n "$assign_probe" ]; then
+          printf 'claude\t%s\n' "$assign_term"
+          return 0
+        fi
+        ;;
+    esac
+  done
+  return 1
+}
+
+assign_parse() {
+  # One line per role named in the text: `role<TAB>effort<TAB>candidate ...`.
+  # Candidates are normalized n-grams from the words beside the role word,
+  # longest and nearest first, so "Opus 5 medium as executor" offers `opus-5`
+  # before `opus`.
+  printf '%s\n' "$1" | awk '
+    function norm(v) {
+      v = tolower(v)
+      gsub(/[ .]/, "-", v)
+      gsub(/--+/, "-", v)
+      sub(/^-/, "", v)
+      sub(/-$/, "", v)
+      return v
+    }
+    function rolename(w) {
+      if (w == "executor" || w == "worker" || w == "implementer" || w == "builder") return "worker"
+      if (w == "reviewer" || w == "review" || w == "reviewers" || w == "critic") return "reviewer"
+      return ""
+    }
+    function iseffort(w) {
+      return (w == "low" || w == "medium" || w == "high" || w == "xhigh" || w == "max")
+    }
+    function isstop(w) {
+      return (w == "as" || w == "the" || w == "a" || w == "an" || w == "and" || w == "with" ||
+              w == "use" || w == "using" || w == "run" || w == "set" || w == "to" || w == "for" ||
+              w == "on" || w == "at" || w == "in" || w == "by" || w == "of" || w == "model" ||
+              w == "models" || w == "please" || w == "linchpin" || w == "effort" || w == "be" ||
+              w == "make" || w == "put" || w == "is" || w == "my" || w == "our" || w == "then")
+    }
+    function emit_ngrams(lo, hi, filtered,   len, start, j, term, ok) {
+      for (len = 3; len >= 1; len--) {
+        for (start = hi - len + 1; start >= lo; start--) {
+          if (start < lo || start + len - 1 > hi) continue
+          ok = 1
+          term = ""
+          for (j = start; j < start + len; j++) {
+            if (iseffort(tok[j]) || isstop(tok[j]) || tok[j] == "") { ok = 0; break }
+            term = (term == "") ? tok[j] : term "-" tok[j]
+          }
+          if (!ok) continue
+          term = norm(term)
+          if (term == "") continue
+          # A term an earlier role already took is offered to this one only
+          # after every fresh term is exhausted. "Sonnet 5 high as reviewer and
+          # terra high as the executor" puts both models between the two role
+          # words, and without this the second role claims the earlier model.
+          if (filtered && (term in claimed)) continue
+          if (term in line_seen) continue
+          line_seen[term] = 1
+          if (filtered) claimed[term] = 1
+          out = (out == "") ? term : out " " term
+        }
+      }
+    }
+    {
+      line = tolower($0)
+      gsub(/[,;:"'"'"'()\[\]!?]/, " ", line)
+      n = split(line, raw, /[[:space:]]+/)
+      count = 0
+      for (i = 1; i <= n; i++) {
+        w = raw[i]
+        gsub(/^[^a-z0-9]+|[^a-z0-9]+$/, "", w)
+        if (w == "") continue
+        tok[++count] = w
+      }
+      k = 0
+      for (i = 1; i <= count; i++) if (rolename(tok[i]) != "") pos[++k] = i
+      for (r = 1; r <= k; r++) {
+        p = pos[r]
+        lo = (r == 1) ? 1 : pos[r - 1] + 1
+        hi = (r == k) ? count : pos[r + 1] - 1
+        effort = ""
+        for (i = p - 1; i >= lo; i--) if (iseffort(tok[i])) { effort = tok[i]; break }
+        if (effort == "") for (i = p + 1; i <= hi; i++) if (iseffort(tok[i])) { effort = tok[i]; break }
+        delete line_seen
+        out = ""
+        emit_ngrams(lo, p - 1, 1)
+        emit_ngrams(p + 1, hi, 1)
+        emit_ngrams(lo, p - 1, 0)
+        emit_ngrams(p + 1, hi, 0)
+        printf "%s|%s|%s\n", rolename(tok[p]), effort, out
+      }
+    }
+  '
+}
+
+assign_apply_config() {
+  # Rewrite only the keys this assignment set, keeping every other key, comment,
+  # and blank line, and creating the file when it is absent.
+  assign_config_file="$1"
+  assign_pairs_file="$2"
+  [ -f "$assign_config_file" ] || : > "$assign_config_file"
+  assign_config_tmp="$assign_config_file.linchpin-assign"
+  awk -v pairsfile="$assign_pairs_file" '
+    BEGIN {
+      order_count = 0
+      while ((getline pair < pairsfile) > 0) {
+        if (pair == "") continue
+        pkey = pair; sub(/=.*$/, "", pkey)
+        pval = pair; sub(/^[^=]*=/, "", pval)
+        want[pkey] = pval
+        order[++order_count] = pkey
+      }
+    }
+    {
+      stripped = $0
+      sub(/[[:space:]]*#.*$/, "", stripped)
+      key = ""
+      if (match(stripped, /^[[:space:]]*[A-Za-z_][A-Za-z_0-9]*[[:space:]]*=/)) {
+        key = substr(stripped, RSTART, RLENGTH)
+        sub(/[[:space:]]*=$/, "", key)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      }
+      if (key != "" && (key in want)) {
+        printf "%s = \"%s\"\n", key, want[key]
+        seen[key] = 1
+        next
+      }
+      print
+    }
+    END {
+      for (i = 1; i <= order_count; i++) {
+        k = order[i]
+        if (!(k in seen)) { printf "%s = \"%s\"\n", k, want[k]; seen[k] = 1 }
+      }
+    }
+  ' "$assign_config_file" > "$assign_config_tmp" &&
+    mv "$assign_config_tmp" "$assign_config_file"
+}
+
+assign() {
+  # `references/intake.md:150` promised that natural-language overrides are
+  # written to `.linchpin.toml` before scheduling, and nothing implemented it:
+  # the manager was left to improvise the mapping from "Astra medium as
+  # reviewer" to two config keys. An improvised mapping is the one thing this
+  # repository does not accept anywhere else, so the mapping is a command.
+  assign_text=''
+  assign_config_dir=''
+  assign_do_write=no
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --config-dir) [ "$#" -ge 2 ] || die 'assign --config-dir needs a path'; assign_config_dir="$2"; shift 2 ;;
+      --config-dir=*) assign_config_dir="${1#--config-dir=}"; shift ;;
+      --write) assign_do_write=yes; shift ;;
+      --*) die "assign does not accept the option: $1" ;;
+      *)
+        [ -z "$assign_text" ] || die "assign accepts one quoted sentence: got '$1'"
+        assign_text="$1"
+        shift
+        ;;
+    esac
+  done
+  [ -n "$assign_text" ] || die 'usage: linchpin.sh assign "<text>" [--config-dir DIR] [--write]'
+  assign_config_dir=$(config_directory "$assign_config_dir")
+  [ -d "$assign_config_dir" ] || die "assign --config-dir is not a directory: $assign_config_dir"
+  models_config_dir="$assign_config_dir"
+
+  assign_tmp=$(mktemp -d "${TMPDIR:-/tmp}/linchpin-assign.XXXXXX")
+  trap 'rm -rf -- "$assign_tmp"' EXIT HUP INT TERM
+  assign_parse "$assign_text" > "$assign_tmp/roles"
+
+  : > "$assign_tmp/resolved"
+  while IFS='|' read -r assign_role assign_effort assign_candidates; do
+    [ -n "$assign_role" ] || continue
+    grep -q "^$assign_role|" "$assign_tmp/resolved" 2>/dev/null && continue
+    assign_alias=''
+    assign_provider=''
+    assign_slug=''
+    for assign_candidate in $assign_candidates; do
+      assign_hit=$(assign_lookup "$assign_candidate")
+      if [ -n "$assign_hit" ]; then
+        assign_alias=$(printf '%s\n' "$assign_hit" | cut -f1)
+        assign_provider=$(printf '%s\n' "$assign_hit" | cut -f2)
+        assign_slug=$(printf '%s\n' "$assign_hit" | cut -f3)
+        break
+      fi
+    done
+    if [ -z "$assign_alias" ]; then
+      # Nothing in a table matched. A model-shaped term still gets verified
+      # live, and only a term that verifies on neither provider is refused.
+      for assign_candidate in $assign_candidates; do
+        if assign_model_shaped "$assign_candidate"; then
+          if assign_live=$(assign_verify_live "$assign_candidate"); then
+            assign_alias="$assign_candidate"
+            assign_provider=$(printf '%s\n' "$assign_live" | cut -f1)
+            assign_slug=$(printf '%s\n' "$assign_live" | cut -f2)
+            printf '%s = "%s:%s"\n' "$assign_alias" "$assign_provider" "$assign_slug" \
+              >> "$assign_config_dir/.linchpin-models.toml"
+            printf 'ASSIGN-ALIAS-MINTED %s = "%s:%s" %s\n' \
+              "$assign_alias" "$assign_provider" "$assign_slug" \
+              "$assign_config_dir/.linchpin-models.toml"
+            break
+          fi
+          printf 'ASSIGN-UNRESOLVED %s\n' "$assign_candidate" >&2
+          die "no provider verified the model term '$assign_candidate' for the $assign_role role; name a model that exists rather than accepting a substitute"
+        fi
+      done
+    fi
+    [ -n "$assign_alias" ] || [ -n "$assign_effort" ] || continue
+    printf '%s|%s|%s|%s|%s\n' \
+      "$assign_role" "$assign_alias" "$assign_effort" "$assign_provider" "$assign_slug" \
+      >> "$assign_tmp/resolved"
+  done < "$assign_tmp/roles"
+
+  if [ ! -s "$assign_tmp/resolved" ]; then
+    # Text naming no assignment is not an error: a caller runs `assign` on every
+    # request so the conversational and file paths converge, and most requests
+    # assign nothing.
+    printf 'ASSIGN-NONE no role assignment in the supplied text\n'
+    return 0
+  fi
+
+  # What the run resolves to today, so a role the text only re-efforts still
+  # reports the provider and model it will actually use.
+  load_config "$assign_config_dir"
+  runtime_metadata
+  models_config_dir="$assign_config_dir"
+
+  : > "$assign_tmp/pairs"
+  while IFS='|' read -r assign_role assign_alias assign_effort assign_provider assign_slug; do
+    [ -n "$assign_role" ] || continue
+    case "$assign_role" in
+      worker) assign_current_alias="${cfg_worker_model:-}"; assign_current_effort="$worker_effort"
+              assign_current_provider="$worker_provider"; assign_current_slug="$worker_model" ;;
+      *) assign_current_alias="${cfg_reviewer_model:-}"; assign_current_effort="$reviewer_effort"
+         assign_current_provider="$reviewer_provider"; assign_current_slug="$reviewer_model" ;;
+    esac
+    if [ -z "$assign_alias" ]; then
+      assign_alias="$assign_current_alias"
+      assign_provider="$assign_current_provider"
+      assign_slug="$assign_current_slug"
+    fi
+    [ -n "$assign_effort" ] || assign_effort="$assign_current_effort"
+    assign_domain=$(effort_domain "$assign_provider")
+    assign_effort_ok=no
+    for assign_word in $assign_domain; do
+      if [ "$assign_word" = "$assign_effort" ]; then assign_effort_ok=yes; fi
+    done
+    [ "$assign_effort_ok" = yes ] ||
+      die "$assign_role effort '$assign_effort' is outside the $assign_provider effort domain ($assign_domain)"
+    printf 'ASSIGN role=%s alias=%s effort=%s provider=%s model=%s\n' \
+      "$assign_role" "$assign_alias" "$assign_effort" "$assign_provider" "$assign_slug"
+    [ -z "$assign_alias" ] || printf '%s=%s\n' "$assign_role" "$assign_alias" >> "$assign_tmp/pairs"
+    printf '%s_effort=%s\n' "$assign_role" "$assign_effort" >> "$assign_tmp/pairs"
+  done < "$assign_tmp/resolved"
+
+  if [ "$assign_do_write" = yes ]; then
+    assign_apply_config "$assign_config_dir/.linchpin.toml" "$assign_tmp/pairs"
+    printf 'ASSIGN-WRITTEN %s\n' "$assign_config_dir/.linchpin.toml"
+    # The file has to survive the validation every other command applies to it.
+    config_values "$assign_config_dir" >/dev/null
+  fi
+}
+
 preflight_model() {
-  # The configured worker may not be the shipped pin, so resolve config before
-  # deciding which model to verify. Verifying the default while the run uses
-  # another model is a preflight that proves nothing. A malformed config must
-  # fail here rather than be swallowed: preflight exists to refuse before any
-  # branch is created, and a PASS naming a model the config never asked for is
-  # worse than no preflight at all. An ABSENT config is the zero-config default
-  # and is not an error.
+  # The configured roles may not be the shipped pins, so resolve config before
+  # deciding what to verify. Verifying the default while the run uses another
+  # model is a preflight that proves nothing. A malformed config must fail here
+  # rather than be swallowed: preflight exists to refuse before any branch is
+  # created, and a PASS naming a model the config never asked for is worse than
+  # no preflight at all. An ABSENT config is the zero-config default, not an
+  # error.
   load_config "${LINCHPIN_CONFIG_DIR:-$PWD}"
   runtime_metadata
-  cache_path="${1:-${LINCHPIN_MODELS_CACHE:-}}"
-  if [ -z "$cache_path" ]; then
-    codex_home="${CODEX_HOME:-${HOME:?HOME is required for model preflight}/.codex}"
-    cache_path="$codex_home/models_cache.json"
-  fi
-  require_file "$cache_path"
-  command -v jq >/dev/null 2>&1 || die 'jq is required for model preflight'
-  # Every `codex exec` child writes its own session state under CODEX_HOME
-  # before the model is ever contacted. When the manager itself runs under a
-  # sandbox that leaves CODEX_HOME read-only, the child dies with `failed to
-  # initialize in-process app-server client: Read-only file system` — and the
-  # run discovers it at the *reviewer*, after every lane has already been built
-  # and committed. That run ended "committed but review-gated" with no review at
-  # all. A directory write test costs nothing and moves the discovery here.
-  preflight_home=$(dirname -- "$cache_path")
-  preflight_probe="$preflight_home/.linchpin-preflight-write"
-  if ! (: > "$preflight_probe") 2>/dev/null; then
-    die "CODEX_HOME is not writable: $preflight_home — every codex exec worker and reviewer fails at app-server init before the model starts; run linchpin from a session that can write it, or set CODEX_HOME to a writable directory"
-  fi
-  rm -f "$preflight_probe"
   # Every role that will actually run gets checked, not just the worker. A
-  # reviewer model missing from the cache fails at the first lane's review,
+  # reviewer model that cannot be verified fails at the first lane's review,
   # after the run has already spent its worker time.
-  for preflight_model_slug in "$worker_model" "$reviewer_model"; do
-    jq -e --arg model "$preflight_model_slug" '
-      [.. | objects | select(.slug? == $model)] | length > 0
-    ' "$cache_path" >/dev/null || die "model missing from $cache_path: $preflight_model_slug"
-    # A model that declares no multi-agent capability is not one this plugin
-    # knows how to drive. Absent is a refusal; the specific version is not.
-    jq -e --arg model "$preflight_model_slug" '
-      [.. | objects | select(.slug? == $model) | select(.multi_agent_version? != null)] | length > 0
-    ' "$cache_path" >/dev/null || die "model declares no multi_agent_version in $cache_path: $preflight_model_slug"
+  preflight_worker_verified=''
+  preflight_reviewer_verified=''
+
+  if [ "$worker_provider" = codex ] || [ "$reviewer_provider" = codex ]; then
+    cache_path="${1:-${LINCHPIN_MODELS_CACHE:-}}"
+    if [ -z "$cache_path" ]; then
+      codex_home="${CODEX_HOME:-${HOME:?HOME is required for model preflight}/.codex}"
+      cache_path="$codex_home/models_cache.json"
+    fi
+    require_file "$cache_path"
+    command -v jq >/dev/null 2>&1 || die 'jq is required for codex model preflight'
+    # Every `codex exec` child writes its own session state under CODEX_HOME
+    # before the model is ever contacted. When the manager itself runs under a
+    # sandbox that leaves CODEX_HOME read-only, the child dies with `failed to
+    # initialize in-process app-server client: Read-only file system` — and the
+    # run discovers it at the *reviewer*, after every lane has already been
+    # built and committed. That run ended "committed but review-gated" with no
+    # review at all. A directory write test costs nothing and moves the
+    # discovery here.
+    preflight_home=$(dirname -- "$cache_path")
+    preflight_probe="$preflight_home/.linchpin-preflight-write"
+    if ! (: > "$preflight_probe") 2>/dev/null; then
+      die "CODEX_HOME is not writable: $preflight_home — every codex exec worker and reviewer fails at app-server init before the model starts; run linchpin from a session that can write it, or set CODEX_HOME to a writable directory"
+    fi
+    rm -f "$preflight_probe"
+  fi
+
+  for preflight_role in worker reviewer; do
+    case "$preflight_role" in
+      worker) preflight_provider="$worker_provider"; preflight_slug="$worker_model" ;;
+      *) preflight_provider="$reviewer_provider"; preflight_slug="$reviewer_model" ;;
+    esac
+    case "$preflight_provider" in
+      codex)
+        jq -e --arg model "$preflight_slug" '
+          [.. | objects | select(.slug? == $model)] | length > 0
+        ' "$cache_path" >/dev/null || die "model missing from $cache_path: $preflight_slug"
+        # A model that declares no multi-agent capability is not one this plugin
+        # knows how to drive. Absent is a refusal; the specific version is not.
+        jq -e --arg model "$preflight_slug" '
+          [.. | objects | select(.slug? == $model) | select(.multi_agent_version? != null)] | length > 0
+        ' "$cache_path" >/dev/null || die "model declares no multi_agent_version in $cache_path: $preflight_slug"
+        # Luna speaks v1 while native spawning speaks v2, so it must never be
+        # started through a native subagent. Linchpin always uses `codex exec`,
+        # and `scripts/verify.sh` greps the skills for `agent_type`/`fork_turns`
+        # to keep it that way; this records which model carries the constraint.
+        preflight_multi_agent=$(jq -r --arg model "$preflight_slug" '
+          [.. | objects | select(.slug? == $model) | .multi_agent_version?] | map(select(. != null)) | first // "unknown"
+        ' "$cache_path")
+        preflight_verified="cache=$cache_path,multi_agent=$preflight_multi_agent"
+        ;;
+      claude)
+        # Claude Code ships no capability cache, so there is nothing to read.
+        # One live trivial request per distinct slug is the only honest check,
+        # and a session that cannot reach the API fails here rather than
+        # discovering it at the first lane. There is no fallback model.
+        preflight_claude="${LINCHPIN_CLAUDE_BIN:-claude}"
+        command -v "$preflight_claude" >/dev/null 2>&1 ||
+          die "claude role requires the Claude Code CLI on PATH: $preflight_claude (set LINCHPIN_CLAUDE_BIN to point at it)"
+        if [ "$preflight_slug" = "${preflight_probed_slug:-}" ]; then
+          preflight_verified="probed"
+        else
+          preflight_out=$("$preflight_claude" -p --model "$preflight_slug" --effort low --max-turns 1 \
+            'Reply with the single word ok.' < /dev/null 2>/dev/null) ||
+            die "claude model probe failed: $preflight_slug — preflight refuses the run rather than falling back to another model"
+          [ -n "$preflight_out" ] ||
+            die "claude model probe returned no output: $preflight_slug — preflight refuses the run rather than falling back to another model"
+          preflight_probed_slug="$preflight_slug"
+          preflight_verified="probed"
+        fi
+        ;;
+      *) die "unknown provider for $preflight_role: $preflight_provider" ;;
+    esac
+    case "$preflight_role" in
+      worker) preflight_worker_verified="$preflight_verified" ;;
+      *) preflight_reviewer_verified="$preflight_verified" ;;
+    esac
   done
-  # Luna speaks v1 while native spawning speaks v2, so it must never be started
-  # through a native subagent. Linchpin always uses `codex exec`, and
-  # `scripts/verify.sh` greps the skills for `agent_type`/`fork_turns` to keep
-  # it that way; this line records which model carries the constraint.
-  worker_multi_agent=$(jq -r --arg model "$worker_model" '
-    [.. | objects | select(.slug? == $model) | .multi_agent_version?] | map(select(. != null)) | first // "unknown"
-  ' "$cache_path")
-  printf 'PREFLIGHT-PASS worker=%s (multi_agent=%s) mechanism=%s reviewer=%s reviewer_mechanism=%s cache=%s\n' \
-    "$worker_model" "$worker_multi_agent" "$worker_mechanism" "$reviewer_model" "$reviewer_mechanism" "$cache_path"
+
+  printf 'PREFLIGHT-PASS worker[provider=%s model=%s mechanism=%s verified=%s] reviewer[provider=%s model=%s mechanism=%s verified=%s]\n' \
+    "$worker_provider" "$worker_model" "$worker_mechanism" "$preflight_worker_verified" \
+    "$reviewer_provider" "$reviewer_model" "$reviewer_mechanism" "$preflight_reviewer_verified"
 }
 
 workspace_ignore_one() {
@@ -1716,20 +2365,44 @@ lane_launch() {
   # a new session so nothing reaps the lane, a recorded exit code so `await`
   # reports the truth, and a liveness check so a lane that died at launch says
   # so instead of being mistaken for one that finished.
+  # Claude Code has no `-C` and takes its prompt on stdin, so a claude lane
+  # needs its working directory and its brief supplied here. Both are optional
+  # and omitting them keeps the codex behavior exactly: `-C <lane>` and the
+  # brief as an argument. They are options rather than something a coordinator
+  # improvises with a `cd &&` string, because a lane started in the wrong
+  # directory commits to the wrong repository.
   launch_pid_file=''
   launch_log=''
   launch_settle=5
+  launch_cwd=''
+  launch_stdin=''
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --pid) [ "$#" -ge 2 ] || die 'launch --pid needs a path'; launch_pid_file="$2"; shift 2 ;;
       --log) [ "$#" -ge 2 ] || die 'launch --log needs a path'; launch_log="$2"; shift 2 ;;
       --settle) [ "$#" -ge 2 ] || die 'launch --settle needs seconds'; launch_settle="$2"; shift 2 ;;
+      --cwd) [ "$#" -ge 2 ] || die 'launch --cwd needs a directory'; launch_cwd="$2"; shift 2 ;;
+      --stdin) [ "$#" -ge 2 ] || die 'launch --stdin needs a path'; launch_stdin="$2"; shift 2 ;;
       --) shift; break ;;
-      *) die 'usage: linchpin.sh launch --pid PATH --log PATH [--settle SECONDS] -- COMMAND...' ;;
+      *) die 'usage: linchpin.sh launch --pid PATH --log PATH [--settle SECONDS] [--cwd DIR] [--stdin FILE] -- COMMAND...' ;;
     esac
   done
   [ -n "$launch_pid_file" ] && [ -n "$launch_log" ] ||
-    die 'usage: linchpin.sh launch --pid PATH --log PATH [--settle SECONDS] -- COMMAND...'
+    die 'usage: linchpin.sh launch --pid PATH --log PATH [--settle SECONDS] [--cwd DIR] [--stdin FILE] -- COMMAND...'
+  if [ -n "$launch_cwd" ]; then
+    [ -d "$launch_cwd" ] || die "launch --cwd is not a directory: $launch_cwd"
+    launch_cwd=$(CDPATH= cd -- "$launch_cwd" && pwd)
+  fi
+  if [ -n "$launch_stdin" ]; then
+    [ -f "$launch_stdin" ] && [ -r "$launch_stdin" ] ||
+      die "launch --stdin is not a readable file: $launch_stdin"
+    launch_stdin=$(absolute_path "$launch_stdin")
+  fi
+  # The child records its pid before it changes directory and appends its log
+  # after, so both paths are resolved here rather than left relative to a cwd
+  # the lane is about to leave.
+  launch_pid_file=$(absolute_path "$launch_pid_file")
+  launch_log=$(absolute_path "$launch_log")
   [ "$#" -ge 1 ] || die 'launch needs a command after --'
   printf '%s\n' "$launch_settle" | grep -Eq '^[0-9]+$' ||
     die "launch --settle is whole seconds: $launch_settle"
@@ -1744,13 +2417,21 @@ lane_launch() {
   # group leader, so `$!` is not reliably the process `await` must watch; `$$`
   # inside the child always is.
   launch_runner='printf "%s\n" "$$" > "$LINCHPIN_LAUNCH_PID"
+[ -z "$LINCHPIN_LAUNCH_CWD" ] || cd "$LINCHPIN_LAUNCH_CWD" || exit 1
 "$@" >> "$LINCHPIN_LAUNCH_LOG" 2>&1
 printf "%s\n" "$?" > "$LINCHPIN_LAUNCH_PID.exit"'
   launch_detach='setsid'
   command -v setsid >/dev/null 2>&1 || launch_detach=''
 
-  LINCHPIN_LAUNCH_PID="$launch_pid_file" LINCHPIN_LAUNCH_LOG="$launch_log" \
-    $launch_detach sh -c "$launch_runner" sh "$@" < /dev/null > /dev/null 2>&1 &
+  if [ -n "$launch_stdin" ]; then
+    LINCHPIN_LAUNCH_PID="$launch_pid_file" LINCHPIN_LAUNCH_LOG="$launch_log" \
+      LINCHPIN_LAUNCH_CWD="$launch_cwd" \
+      $launch_detach sh -c "$launch_runner" sh "$@" < "$launch_stdin" > /dev/null 2>&1 &
+  else
+    LINCHPIN_LAUNCH_PID="$launch_pid_file" LINCHPIN_LAUNCH_LOG="$launch_log" \
+      LINCHPIN_LAUNCH_CWD="$launch_cwd" \
+      $launch_detach sh -c "$launch_runner" sh "$@" < /dev/null > /dev/null 2>&1 &
+  fi
 
   # Give the child a moment to record its pid before reading it back.
   launch_waited=0
@@ -2330,13 +3011,18 @@ linchpin.sh COMMAND [ARGS]
         [--out PATH] [--config-dir DIR]
   brief-check PRD BRIEF [--config-dir DIR]           verify a brief against its PRD
   review-brief PRD LANE_ID --gates PATH --commit SHA emit the read-only review brief
-        --ledger PATH [--round N] [--out PATH]
+        --ledger PATH [--round N] [--out PATH] [--config-dir DIR]
         counts the round in the ledger; at most 2 per lane, the 2nd only with --round 2
   files PRD                                          print the parsed Files (N) list
   mode EXECUTION PRD... [--config-dir DIR]           group lanes by file collision
   schedule EXECUTION STATUS LANE... [--config-dir DIR]
         STATUS: ok | worktree-fail | dirty-tree | unparsed-files | config
   gate PRD REPORT                                    check observed-red evidence
+  assign "TEXT" [--config-dir DIR] [--write]         read role/model/effort out of a sentence
+        role words: executor|worker|implementer|builder, reviewer|review|critic
+        prints one ASSIGN line per role; --write updates .linchpin.toml in place
+        a model in no alias table is verified live and recorded in
+        .linchpin-models.toml; one that verifies nowhere is ASSIGN-UNRESOLVED
   config [REPO]                                      print resolved .linchpin.toml
   workspace [REPO]                                   make .linchpin/ and ignore run output
   lane LEDGER LANE_ID --set key=value... [--repo DIR] record one run-ledger row
@@ -2352,8 +3038,12 @@ linchpin.sh COMMAND [ARGS]
         is not delivered, has uncommitted changes, or whose commits exist nowhere
         but that branch, and names what it kept
   launch --pid PATH --log PATH [--settle S] -- CMD   detach one lane and prove it is alive
+        [--cwd DIR] [--stdin FILE]
+        --cwd starts the lane inside its worktree and --stdin feeds the brief on
+        stdin; a claude role needs both, a codex role needs neither
   await PIDFILE... [--interval S] [--timeout S]      block until a group's lanes exit
-  preflight [MODELS_CACHE.json]                      check the worker model
+  preflight [MODELS_CACHE.json]                      check every role's model
+        codex roles by cache lookup, claude roles by one live probe
   help                                               this text
 
 EXECUTION is auto, parallel, or sequential.
@@ -2400,13 +3090,14 @@ case "$command_name" in
     fi
     ;;
   help|--help|-h) usage; exit 0 ;;
+  assign) [ "$#" -ge 1 ] || die 'usage: linchpin.sh assign "TEXT" [--config-dir DIR] [--write]'; assign "$@" ;;
   config) [ "$#" -le 1 ] || die 'usage: linchpin.sh config [repo]'; config_values "${1:-${LINCHPIN_CONFIG_DIR:-$PWD}}" ;;
   workspace) [ "$#" -le 1 ] || die 'usage: linchpin.sh workspace [repo]'; workspace "${1:-}" ;;
   lane) [ "$#" -ge 3 ] || die 'usage: linchpin.sh lane LEDGER LANE_ID --set key=value... [--repo DIR]'; lane_record "$@" ;;
   status) [ "$#" -eq 1 ] || die 'usage: linchpin.sh status LEDGER'; run_status "$1" ;;
   prune) [ "$#" -ge 1 ] || die 'usage: linchpin.sh prune LEDGER [--repo DIR] [--base REF] [--dry-run] [--force]'; prune_run "$@" ;;
   worktree) [ "$#" -ge 3 ] || die 'usage: linchpin.sh worktree REPO LANE_SLUG BASE_REF [--path DIR]'; lane_worktree "$@" ;;
-  launch) [ "$#" -ge 5 ] || die 'usage: linchpin.sh launch --pid PATH --log PATH [--settle SECONDS] -- COMMAND...'; lane_launch "$@" ;;
+  launch) [ "$#" -ge 5 ] || die 'usage: linchpin.sh launch --pid PATH --log PATH [--settle SECONDS] [--cwd DIR] [--stdin FILE] -- COMMAND...'; lane_launch "$@" ;;
   await) [ "$#" -ge 1 ] || die 'usage: linchpin.sh await PIDFILE... [--interval SECONDS] [--timeout SECONDS]'; lane_await "$@" ;;
   route) [ "$#" -ge 1 ] || die 'usage: linchpin.sh route INTENT [SCORE] [PRD ...] [--config-dir DIR]'; route "$@" ;;
   mode) [ "$#" -ge 2 ] || die 'usage: linchpin.sh mode EXECUTION PRD...'; mode_selection "$@" ;;

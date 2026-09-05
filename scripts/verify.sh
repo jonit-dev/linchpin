@@ -79,9 +79,12 @@ if [ -n "$native_hits" ]; then
   fail 'native subagent terms are present in a skill; Luna must use codex exec'
 fi
 
+# A Claude id pasted into a skill body is the same stale pin a codex slug is.
+# Both providers, one rule: the alias tables in references/runtime.md are the
+# only place a slug appears.
 pin_hits=$(printf '%s\n' "$skill_files" | while IFS= read -r skill; do
   [ -n "$skill" ] || continue
-  grep -nE 'gpt-5[.]6-[[:alnum:].-]+' "$skill" | sed "s#^#$skill:#"
+  grep -nE 'gpt-5[.]6-[[:alnum:].-]+|claude-(opus|sonnet|haiku|fable)-[0-9][[:alnum:].-]*' "$skill" | sed "s#^#$skill:#"
 done || true)
 if [ -n "$pin_hits" ]; then
   printf '%s\n' "$pin_hits" >&2
@@ -141,6 +144,24 @@ if ! grep -Eq '^## Per-group mode selection' "$repo_root/skills/prd-swarm-coordi
 fi
 if ! grep -Eq '^## Intent routing table' "$repo_root/references/intake.md"; then
   fail 'intake routing table is missing'
+fi
+if ! grep -Eq '^## Provider mechanisms' "$repo_root/references/runtime.md"; then
+  fail 'runtime provider mechanisms section is missing'
+fi
+for required_mechanism in \
+  'codex exec --sandbox danger-full-access' \
+  'codex exec --sandbox read-only' \
+  'claude -p --permission-mode bypassPermissions' \
+  'claude -p --permission-mode plan --disallowed-tools "Edit Write NotebookEdit"'; do
+  if ! grep -Fq "$required_mechanism" "$repo_root/references/runtime.md"; then
+    fail "runtime provider mechanisms section does not declare: $required_mechanism"
+  fi
+done
+if ! grep -Fq 'ROUTE-ASSIGN-MODELS' "$repo_root/references/intake.md"; then
+  fail 'intake routing table has no model-assignment route'
+fi
+if ! grep -Fq '.linchpin-models.toml' "$repo_root/references/intake.md"; then
+  fail 'intake does not document the repo-local alias table'
 fi
 
 model_cache="${LINCHPIN_MODELS_CACHE:-}"

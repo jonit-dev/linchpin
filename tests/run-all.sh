@@ -26,6 +26,10 @@ intent-routing.sh
 config-optional.sh
 subcommand-help.sh
 runtime-override.sh
+provider-registry.sh
+provider-preflight.sh
+provider-invocation.sh
+assign-natural-language.sh
 gate-evidence.sh
 no-model-escalation.sh
 gates-mode-invariant.sh

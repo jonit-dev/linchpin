@@ -6,8 +6,9 @@ license: MIT
 
 # PRD Swarm Coordinator
 
-You are the Manager. Workers and reviewers are `codex exec` subprocesses; you
-never edit lane code yourself and never spawn a native subagent.
+You are the Manager. Workers and reviewers are subprocesses — `codex exec` or
+`claude -p`, whichever provider the role resolved to; you never edit lane code
+yourself and never spawn a native subagent.
 
 Paths: `references/` and `scripts/` sit at the plugin root, beside `skills/`;
 from this file that is `../../`. Read `references/runtime.md` for role pins
@@ -29,8 +30,11 @@ S=scripts/linchpin.sh; REPO=<target-repo>; TS=$(date +%Y%m%d-%H%M%S); L=$REPO/.l
 sh $S preflight && sh $S workspace "$REPO" && sh $S mode auto --config-dir "$REPO" <prd>...
 ```
 
-`preflight` resolves both role models and confirms `$CODEX_HOME` is writable —
-every subprocess needs that before its model starts. `workspace` must run before
+`preflight` resolves both roles and verifies each one the way its provider is
+verified: a codex role against the local capability cache, a claude role with
+one live probe. It also confirms `$CODEX_HOME` is writable whenever a codex role
+will run — every `codex exec` subprocess needs that before its model starts.
+Read the providers off its `PREFLIGHT-PASS` line; do not assume them. `workspace` must run before
 the first write to `.linchpin/`; it keeps run output out of `git status`.
 Run these once per batch, not once per lane.
 
@@ -43,9 +47,15 @@ source but no build state, and a repository whose commit hooks run out of
 Record all of it in the ledger and put the resolved gate commands in every brief
 rather than letting each lane rediscover them.
 
-Only a missing Git repository or missing worker capability is a refusal.
-Everything else — no worktree, dirty tree, no remote, no PR client — is a named
-degradation announced before it takes effect.
+Only a missing Git repository or a role that preflight could not verify is a
+refusal. Everything else — no worktree, dirty tree, no remote, no PR client — is
+a named degradation announced before it takes effect. A model that cannot be
+verified is never swapped for one that can.
+
+If the user's request names a model, a role, or an effort, the router already
+ran `sh $S assign "<their words>" --config-dir "$REPO" --write`. If you reached
+here without that, run it before `preflight`, because preflight has to verify
+the models the run will actually use.
 
 ## Per-group mode selection
 
@@ -74,20 +84,43 @@ LANE=lane-1 SLUG=<prd-slug> PRD=<prd-path> BASE=<base> MODE=parallel DELIVERY=pr
 sh $S worktree "$REPO" "$SLUG" "$BASE" \
   && sh $S brief "$PRD" "$LANE" "$MODE" "$DELIVERY" --config-dir "$REPO" --out "$REPO/.linchpin/$LANE.brief" \
   && sh $S brief-check "$PRD" "$REPO/.linchpin/$LANE.brief" --config-dir "$REPO" \
-  && sh $S lane "$L" "$LANE" --set state=RUNNING --set prd="$PRD" --set branch="linchpin/$SLUG" \
-  && sh $S launch --pid "$REPO/.linchpin/$LANE.pid" --log "$REPO/.linchpin/$LANE.log" \
-     -- codex exec --sandbox danger-full-access \
-        --model <Worker.Model> -c 'model_reasoning_effort="<Worker.Effort>"' \
-        -C "$REPO/.worktrees/$SLUG" "$(cat "$REPO/.linchpin/$LANE.brief")"
+  && sh $S lane "$L" "$LANE" --set state=RUNNING --set prd="$PRD" --set branch="linchpin/$SLUG"
 ```
 
-`--sandbox danger-full-access` is not optional and not a shortcut. Under the
+Then read `Worker provider:` out of the brief and launch that provider's shape.
+**codex** takes the lane with `-C` and the brief as an argument:
+
+```sh
+sh $S launch --pid "$REPO/.linchpin/$LANE.pid" --log "$REPO/.linchpin/$LANE.log" \
+  -- codex exec --sandbox danger-full-access \
+     --model <Worker.Model> -c 'model_reasoning_effort="<Worker.Effort>"' \
+     -C "$REPO/.worktrees/$SLUG" "$(cat "$REPO/.linchpin/$LANE.brief")"
+```
+
+**claude** has no `-C` and reads its prompt from stdin, so the lane is the
+process cwd and the brief is a file. Generate the session id *before* launch and
+record it, so a continuation is possible even if the process dies:
+
+```sh
+SID=$(uuidgen)
+sh $S lane "$L" "$LANE" --set session="$SID" \
+  && sh $S launch --pid "$REPO/.linchpin/$LANE.pid" --log "$REPO/.linchpin/$LANE.log" \
+     --cwd "$REPO/.worktrees/$SLUG" --stdin "$REPO/.linchpin/$LANE.brief" \
+     -- claude -p --permission-mode bypassPermissions \
+        --model <Worker.Model> --effort <Worker.Effort> --session-id "$SID"
+```
+
+Use `--cwd`; never a `cd &&` string. A claude lane started where you stood
+commits to the wrong repository.
+
+The worker's write access is not optional and not a shortcut. Under codex's
 default sandbox a worker cannot write `<repo>/.git/worktrees/<slug>/`, which is
 where a worktree keeps its git metadata, so it cannot commit and the lane can
 only end `PARTIAL`; it also cannot bind the unix socket Node toolchains use, so
-declared gates fail as setup errors. `references/runtime.md` records the
+declared gates fail as setup errors. A claude worker that has to ask before each
+write cannot run unattended at all. `references/runtime.md` records the
 reproduction. The lane's bound is its worktree, its branch, its file list and a
-read-only reviewer — not the worker's sandbox.
+reviewer that cannot write — not the worker's sandbox.
 
 Pass `--config-dir` to both `brief` and `brief-check`; a brief emitted with the
 repository's config but checked without it fails on a stale runtime pin. The
@@ -95,10 +128,14 @@ brief is the handoff — it carries the file list, the Integration Ledger, the
 Negative Controls, the Acceptance Criteria, and the Checkpoint Protocol
 verbatim. A prompt you compose yourself instead is a dropped ledger.
 
-Model, effort, and mechanism come only from `references/runtime.md` (or a repo's
-`.linchpin.toml` overrides, which `brief --config-dir` already resolved). Read
-them out of the brief rather than restating a pin from memory. Never change
-model or tier during a run, above all to get past a failed gate.
+Provider, model, effort, and mechanism come only from `references/runtime.md`
+(or a repo's `.linchpin.toml` overrides, which `brief --config-dir` already
+resolved). **No skill body names a model id**; every one comes out of the brief's
+`Worker provider:`, `Reviewer provider:`, and `Runtime invocation:` lines. Read
+them there rather than restating a pin from memory. The two roles resolve
+independently, so a run may have a claude worker and a codex reviewer. Never
+change provider, model, or tier during a run, above all to get past a failed
+gate.
 
 **Never start a worker in the foreground.** `launch` puts the lane in its own
 session and records its exit code where `await` reads it; a hand-written
@@ -125,6 +162,11 @@ first worker and updated as each lane changes state. Write every row with
 upserts and keeps earlier fields, so record what you know when you know it: PRD,
 slug, baseline, branch, isolation mode, file set, group, process id, subprocess
 session id, brief path, gate commands, review state, delivery mode, evidence.
+
+Record `worker_provider`, `worker_model`, `reviewer_provider`, and
+`reviewer_model` on every lane, read off the brief. A finished run has to be
+able to say which providers ran it; "the models it actually used" is not
+recoverable from a log after the fact.
 
 `lane` refuses a row it cannot verify — an unknown state, `MERGED` as a product
 state, a commit sha that does not resolve, a `DELIVERED(...)` row missing its
@@ -163,16 +205,33 @@ launched anyway returns a rejection that says nothing about the code:
    it cannot install dependencies, bind a port, or run the suites.
 
 ```sh
-sh $S review-brief "$PRD" "$LANE" --gates <gate-evidence.md> --commit <sha> --ledger "$L" --out <review> \
-  && codex exec --model <Reviewer.Model> -c 'model_reasoning_effort="<Reviewer.Effort>"' \
-       --sandbox read-only -C "$REPO/.worktrees/$SLUG" "$(cat <review>)"
+sh $S review-brief "$PRD" "$LANE" --gates <gate-evidence.md> --commit <sha> \
+  --ledger "$L" --config-dir "$REPO" --out <review>
+```
+
+Then launch the reviewer in its own provider's read-only shape, taken from the
+packet's `Reviewer provider:` line. **codex**:
+
+```sh
+codex exec --model <Reviewer.Model> -c 'model_reasoning_effort="<Reviewer.Effort>"' \
+  --sandbox read-only -C "$REPO/.worktrees/$SLUG" "$(cat <review>)"
+```
+
+**claude**, which is read-only by having its write tools denied outright:
+
+```sh
+sh $S launch --pid "$REPO/.linchpin/$LANE.review.pid" --log "$REPO/.linchpin/$LANE.review.log" \
+  --cwd "$REPO/.worktrees/$SLUG" --stdin <review> \
+  -- claude -p --permission-mode plan --disallowed-tools "Edit Write NotebookEdit" \
+     --model <Reviewer.Model> --effort <Reviewer.Effort> --session-id "$(uuidgen)"
 ```
 
 Pass the file `--out` wrote; never interpolate the packet's text into the
 command line — it contains backticks, quotes, and table pipes, and a manager
 that hand-escaped one read `Reading additional input from stdin...` as a review.
-A reviewer that exits before its model starts is an environment failure, not a
-verdict; report the lane unreviewed.
+`--stdin` removes that hazard for a claude reviewer entirely. A reviewer that
+exits before its model starts is an environment failure, not a verdict; report
+the lane unreviewed.
 
 **Two reviews per lane is the hard ceiling.** `review-brief` emits round 1 and
 refuses round 2 unless you pass `--round 2`; it refuses round 3 outright. A
@@ -190,10 +249,11 @@ valid. State facts in the brief without classifying them — a brief that says
 
 A repair round is for a `DEFECT`, runs on the Worker row, and needs a handoff
 that differs from the failed prompt: exact file, line, expected behavior,
-failing command, newly required test. Never repeat an unchanged prompt. Use
-`codex exec resume <session-id> -c sandbox_mode="danger-full-access"` only for a
-recorded continuation — `resume` takes no `--sandbox` flag, so without that
-config the continued worker cannot commit. Committing a
+failing command, newly required test. Never repeat an unchanged prompt. Continue only a recorded session, in its own provider's form:
+`codex exec resume <session-id> -c sandbox_mode="danger-full-access"` — `resume`
+takes no `--sandbox` flag, so without that config the continued worker cannot
+commit — or `claude --resume <session-id> -p` for a claude lane, using the
+session id you generated and recorded at launch. Committing a
 diff that already exists is manager integration work, not a repair round.
 Ordinary overlap and merge conflicts are manager-directed integration; a
 semantic conflict that would violate a PRD is a named `BLOCKED` decision.

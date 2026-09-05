@@ -25,7 +25,10 @@ separate process that cannot write. The model that wrote the code is never the
 model that approves it, and you are not paying manager-tier rates for the part
 that is mostly typing.
 
-Codex only. Claude Code is not supported.
+Two providers, per role. The shipped pins are Codex, so a zero-config run is
+exactly the run above. Name a Claude alias for a role and that role becomes a
+`claude -p` process instead — you can put a Claude Code worker beside a Codex
+reviewer in the same run, and each is verified before a branch exists.
 
 ## Install
 
@@ -111,10 +114,10 @@ base = "auto"            # auto = repository default branch
 review = true
 max_lanes = 4
 prd_floor = 3
-worker = ""              # "" = shipped pin; luna | sol | terra
-worker_effort = ""       # "" = shipped pin; low | medium | high | max
-reviewer = ""            # "" = shipped pin; luna | sol | terra
-reviewer_effort = ""     # "" = shipped pin; low | medium | high | max
+worker = ""              # "" = shipped pin; an alias from the table below
+worker_effort = ""       # "" = shipped pin; the resolved provider's domain
+reviewer = ""            # "" = shipped pin; an alias from the table below
+reviewer_effort = ""     # "" = shipped pin; the resolved provider's domain
 ```
 
 `sh scripts/linchpin.sh config .` prints what actually resolved, including which
@@ -130,9 +133,44 @@ the same as a typo would be, because a slug written into a config file goes stal
 the moment the model class moves. The alias table in `references/runtime.md` is
 the only place a slug appears.
 
-Preflight checks both the worker and the reviewer model against your local model
-cache before creating any branch. Otherwise a missing reviewer model would blow
-up at the first review, after the run had already spent all its worker time.
+The provider travels with the alias — there is no provider key to keep in sync:
+
+| Provider | Aliases | Effort domain |
+|---|---|---|
+| Codex | `luna`, `sol`, `terra`, `astra` | `low` `medium` `high` `max` |
+| Claude Code | `opus-5`, `opus-4.8`, `sonnet-5`, `haiku-4.5`, `fable-5.1` | `low` `medium` `high` `xhigh` `max` |
+
+Effort is checked against the domain of the provider that role resolved to, so
+`xhigh` is accepted for a Claude role and refused for a Codex one.
+
+You do not have to edit the file. Say what you want:
+
+```sh
+sh scripts/linchpin.sh assign "use Linchpin with Astra medium as reviewer and Opus 5 medium as executor" --config-dir . --write
+```
+
+```text
+ASSIGN role=reviewer alias=astra effort=medium provider=codex model=gpt-6-astra
+ASSIGN role=worker alias=opus-5 effort=medium provider=claude model=claude-opus-5
+ASSIGN-WRITTEN ./.linchpin.toml
+```
+
+`executor`, `worker`, `implementer` and `builder` all name the worker;
+`reviewer`, `review` and `critic` name the reviewer. Drop `--write` to see what
+it resolved without changing anything.
+
+**A model that is not in the table is not refused — it is verified.** `assign`
+looks an unknown name up live (the Codex capability cache, or one trivial Claude
+Code request) and, when it comes back, records it in `.linchpin-models.toml` in
+your repo so it is still an alias everywhere downstream. A name that verifies on
+neither provider is refused *by name*: `ASSIGN-UNRESOLVED nimbus-9` and a
+non-zero exit, never a quiet substitution.
+
+Preflight checks every role before creating any branch — a Codex role against
+your local model cache, a Claude role with one live `--max-turns 1` probe per
+distinct model. Otherwise a missing reviewer model would blow up at the first
+review, after the run had already spent all its worker time. A failure is a
+refusal, not a downgrade.
 
 None of these settings weaken review or gate evidence. Those come from the PRD.
 
@@ -218,5 +256,4 @@ check or removal.
 
 ## Not in v1
 
-Claude Code support, patch delivery, cross-lane dependency ordering, and the
-optional goal loop.
+Patch delivery, cross-lane dependency ordering, and the optional goal loop.

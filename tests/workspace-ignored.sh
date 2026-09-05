@@ -12,7 +12,14 @@ git -C "$target" -c user.email=t@example.com -c user.name=t commit -qm 'init'
 
 first=$(sh "$repo_root/scripts/linchpin.sh" workspace "$target")
 assert_contains "$first" 'WORKSPACE-IGNORED .linchpin/'
-assert_contains "$first" 'WORKSPACE-IGNORED .worktrees/'
+# Either outcome satisfies the claim. A user whose global core.excludes already
+# covers `.worktrees/` gets ALREADY-IGNORED here, and asserting only the write
+# path makes this test fail on their machine for a repository that is correctly
+# ignored. What matters is proved below: nothing shows up in `git status`.
+case "$first" in
+  *'WORKSPACE-IGNORED .worktrees/'*|*'WORKSPACE-ALREADY-IGNORED .worktrees/'*) ;;
+  *) fail "workspace did not claim .worktrees/: $first" ;;
+esac
 assert_contains "$first" 'WORKSPACE-READY'
 [ -d "$target/.linchpin" ] || fail 'workspace did not create the run directory'
 

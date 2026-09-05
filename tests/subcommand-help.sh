@@ -8,7 +8,7 @@
 # then guesses the arguments, and a guessed `lane` call is a ledger row that
 # never gets written.
 
-for helped in brief brief-check review-brief lane worktree gate status launch await mode route schedule config workspace preflight files contract migrate; do
+for helped in brief brief-check review-brief lane worktree gate status launch await mode route schedule assign config workspace preflight files contract migrate; do
   help_out="$tmp_dir/help-$helped.out"
   if ! sh "$repo_root/scripts/linchpin.sh" "$helped" --help > "$help_out" 2>&1; then
     cat "$help_out" >&2
@@ -36,6 +36,12 @@ review_help=$(sh "$repo_root/scripts/linchpin.sh" review-brief --help 2>&1)
 assert_contains "$review_help" '--ledger PATH'
 brief_help=$(sh "$repo_root/scripts/linchpin.sh" brief --help 2>&1)
 assert_contains "$brief_help" '--config-dir DIR'
+assign_help=$(sh "$repo_root/scripts/linchpin.sh" assign --help 2>&1)
+assert_contains "$assign_help" '--write'
+assert_contains "$assign_help" 'ASSIGN-UNRESOLVED'
+launch_help=$(sh "$repo_root/scripts/linchpin.sh" launch --help 2>&1)
+assert_contains "$launch_help" '--cwd DIR'
+assert_contains "$launch_help" '--stdin FILE'
 
 # Help for something that is not a command stays a failure; a tool that answers
 # every question has answered none of them.
