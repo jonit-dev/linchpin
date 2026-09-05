@@ -1,6 +1,6 @@
 {
   "name": "linchpin",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Multi-provider PRD swarm orchestration with contract-preserving intake.",
   "author": {
     "name": "Linchpin contributors",
