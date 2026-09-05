@@ -199,12 +199,23 @@ runtime_mechanisms_valid() {
       *"$mechanism_read"*) ;;
       *) die "references/runtime.md $mechanism_provider Reviewer mechanism does not carry its read-only access flag ($mechanism_read); a reviewer that can edit what it judges is not a review" ;;
     esac
+    # The auditor judges the combined batch and hands findings back for someone
+    # else to repair. An auditor that can write is a second worker with the
+    # authority of a reviewer, and its own findings become unreviewable.
+    [ -n "$(provider_cell 'Auditor mechanism' "$mechanism_provider")" ] ||
+      die "references/runtime.md Provider mechanisms has no $mechanism_provider Auditor mechanism"
+    case "$(provider_cell 'Auditor mechanism' "$mechanism_provider")" in
+      *"$mechanism_read"*) ;;
+      *) die "references/runtime.md $mechanism_provider Auditor mechanism does not carry its read-only access flag ($mechanism_read); an auditor that can edit what it judges is not an audit" ;;
+    esac
   done
   for mechanism_provider in codex claude; do
     mechanism_worker=$(provider_cell 'Worker mechanism' "$mechanism_provider")
     for mechanism_other in codex claude; do
       [ "$mechanism_worker" != "$(provider_cell 'Reviewer mechanism' "$mechanism_other")" ] ||
         die "references/runtime.md gives the $mechanism_provider Worker the $mechanism_other Reviewer mechanism; a worker that cannot write ends every lane PARTIAL"
+      [ "$mechanism_worker" != "$(provider_cell 'Auditor mechanism' "$mechanism_other")" ] ||
+        die "references/runtime.md gives the $mechanism_provider Worker the $mechanism_other Auditor mechanism; a worker that cannot write ends every lane PARTIAL"
     done
   done
 }
@@ -222,6 +233,14 @@ role_invocation() {
       printf '%s --model %s --effort %s --session-id <session> [cwd=<lane>, brief on stdin]\n' "$3" "$4" "$5" ;;
     claude:reviewer)
       printf '%s --model %s --effort %s --session-id <session> [cwd=<lane>, review on stdin]\n' "$3" "$4" "$5" ;;
+    # The auditor's working directory is the combined candidate, not one lane.
+    # An auditor pointed at a lane worktree cannot see the cross-lane behavior
+    # it exists to check, which is the whole difference between it and a second
+    # reviewer.
+    codex:auditor)
+      printf "codex exec --model %s -c 'model_reasoning_effort=\"%s\"' --sandbox read-only -C <repo> <audit>\n" "$4" "$5" ;;
+    claude:auditor)
+      printf '%s --model %s --effort %s --session-id <session> [cwd=<repo>, audit on stdin]\n' "$3" "$4" "$5" ;;
     *) die "no invocation shape for provider '$2' in role '$1'" ;;
   esac
 }
@@ -237,8 +256,13 @@ runtime_metadata() {
   reviewer_model=$(runtime_value Reviewer 4)
   reviewer_effort=$(runtime_value Reviewer 5)
   reviewer_mechanism_pin=$(runtime_value Reviewer 6)
+  auditor_provider=$(runtime_value Auditor 3)
+  auditor_model=$(runtime_value Auditor 4)
+  auditor_effort=$(runtime_value Auditor 5)
+  auditor_mechanism_pin=$(runtime_value Auditor 6)
   [ -n "$worker_provider" ] || die 'runtime.md has no Worker provider pin'
   [ -n "$reviewer_provider" ] || die 'runtime.md has no Reviewer provider pin'
+  [ -n "$auditor_provider" ] || die 'runtime.md has no Auditor provider pin'
   # The mechanism a role carries is derived from its provider, not copied by
   # hand. The Role pins cell still has to agree with the provider it names, or
   # the table describes a role nothing can launch. The worker mechanism carries
@@ -251,6 +275,8 @@ runtime_metadata() {
     die "runtime.md Worker mechanism is not the $worker_provider Worker mechanism"
   [ "$reviewer_mechanism_pin" = "$(provider_cell 'Reviewer mechanism' "$reviewer_provider")" ] ||
     die "runtime.md Reviewer mechanism is not the $reviewer_provider Reviewer mechanism"
+  [ "$auditor_mechanism_pin" = "$(provider_cell 'Auditor mechanism' "$auditor_provider")" ] ||
+    die "runtime.md Auditor mechanism is not the $auditor_provider Auditor mechanism"
   # A repo-local effort override, declared before the run starts, is the user's
   # call. It is not the forbidden thing: what the delegation rules prohibit is
   # the MANAGER changing tier mid-run to get past a gate that failed. The model
@@ -258,6 +284,7 @@ runtime_metadata() {
   # substituting one is how a run silently stops being the run that was checked.
   [ -z "${cfg_worker_effort:-}" ] || worker_effort="$cfg_worker_effort"
   [ -z "${cfg_reviewer_effort:-}" ] || reviewer_effort="$cfg_reviewer_effort"
+  [ -z "${cfg_auditor_effort:-}" ] || auditor_effort="$cfg_auditor_effort"
   if [ -n "${cfg_worker_model:-}" ]; then
     runtime_row=$(resolve_model "$cfg_worker_model")
     [ -n "$runtime_row" ] || die "unknown worker alias: $cfg_worker_model (see the Model aliases table in references/runtime.md)"
@@ -270,18 +297,32 @@ runtime_metadata() {
     reviewer_provider=$(resolve_field "$runtime_row" 1)
     reviewer_model=$(resolve_field "$runtime_row" 2)
   fi
+  # The auditor resolves through the same registry as every other role. Being
+  # the expensive role is not a licence to name a model outside the table.
+  if [ -n "${cfg_auditor_model:-}" ]; then
+    runtime_row=$(resolve_model "$cfg_auditor_model")
+    [ -n "$runtime_row" ] || die "unknown auditor alias: $cfg_auditor_model (see the Model aliases table in references/runtime.md)"
+    auditor_provider=$(resolve_field "$runtime_row" 1)
+    auditor_model=$(resolve_field "$runtime_row" 2)
+  fi
   [ -n "$worker_model" ] || die 'runtime.md has no Worker model pin'
   [ -n "$worker_effort" ] || die 'runtime.md has no Worker effort pin'
   [ -n "$reviewer_model" ] || die 'runtime.md has no Reviewer model pin'
   [ -n "$reviewer_effort" ] || die 'runtime.md has no Reviewer effort pin'
+  [ -n "$auditor_model" ] || die 'runtime.md has no Auditor model pin'
+  [ -n "$auditor_effort" ] || die 'runtime.md has no Auditor effort pin'
   worker_mechanism=$(provider_cell 'Worker mechanism' "$worker_provider")
   reviewer_mechanism=$(provider_cell 'Reviewer mechanism' "$reviewer_provider")
+  auditor_mechanism=$(provider_cell 'Auditor mechanism' "$auditor_provider")
   [ -n "$worker_mechanism" ] || die "no Worker mechanism for provider: $worker_provider"
   [ -n "$reviewer_mechanism" ] || die "no Reviewer mechanism for provider: $reviewer_provider"
+  [ -n "$auditor_mechanism" ] || die "no Auditor mechanism for provider: $auditor_provider"
   worker_runtime="model=$worker_model; effort=$worker_effort; mechanism=$worker_mechanism"
   reviewer_runtime="model=$reviewer_model; effort=$reviewer_effort; mechanism=$reviewer_mechanism"
+  auditor_runtime="model=$auditor_model; effort=$auditor_effort; mechanism=$auditor_mechanism"
   worker_invocation=$(role_invocation worker "$worker_provider" "$worker_mechanism" "$worker_model" "$worker_effort")
   reviewer_invocation=$(role_invocation reviewer "$reviewer_provider" "$reviewer_mechanism" "$reviewer_model" "$reviewer_effort")
+  auditor_invocation=$(role_invocation auditor "$auditor_provider" "$auditor_mechanism" "$auditor_model" "$auditor_effort")
 }
 
 marker_is_valid() {
@@ -850,8 +891,10 @@ load_config() {
       audit_source) cfg_audit_source="$config_value" ;;
       worker) cfg_worker_model="$config_value" ;;
       reviewer) cfg_reviewer_model="$config_value" ;;
+      auditor) cfg_auditor_model="$config_value" ;;
       worker_effort) cfg_worker_effort="$config_value" ;;
       reviewer_effort) cfg_reviewer_effort="$config_value" ;;
+      auditor_effort) cfg_auditor_effort="$config_value" ;;
     esac
   done <<EOF
 $resolved_config
@@ -1262,8 +1305,10 @@ config_values() {
   # Empty means "use the pin in runtime.md" — the zero-config default.
   worker_effort_override=
   reviewer_effort_override=
+  auditor_effort_override=
   worker_override=
   reviewer_override=
+  auditor_override=
   if [ -f "$config_file" ]; then
     while IFS= read -r raw || [ -n "$raw" ]; do
       line=$(printf '%s' "$raw" | sed 's/[[:space:]]*#.*$//')
@@ -1283,8 +1328,10 @@ config_values() {
         audit) audit="$value"; audit_source=config ;;
         worker) worker_override="$value" ;;
         reviewer) reviewer_override="$value" ;;
+        auditor) auditor_override="$value" ;;
         worker_effort) worker_effort_override="$value" ;;
         reviewer_effort) reviewer_effort_override="$value" ;;
+        auditor_effort) auditor_effort_override="$value" ;;
         *) die "unknown .linchpin.toml key: $key" ;;
       esac
     done < "$config_file"
@@ -1308,11 +1355,12 @@ config_values() {
   # linchpin: codex has no `xhigh` and Claude Code does, so one shared list
   # either rejects a word Claude accepts or passes one codex rejects once per
   # lane, after the run is already underway.
-  for role_pair in "worker=$worker_override" "reviewer=$reviewer_override"; do
+  for role_pair in "worker=$worker_override" "reviewer=$reviewer_override" "auditor=$auditor_override"; do
     role_name=${role_pair%%=*}
     role_alias=${role_pair#*=}
     case "$role_name" in
       worker) role_pin=Worker; role_effort="$worker_effort_override" ;;
+      auditor) role_pin=Auditor; role_effort="$auditor_effort_override" ;;
       *) role_pin=Reviewer; role_effort="$reviewer_effort_override" ;;
     esac
     if [ -n "$role_alias" ]; then
@@ -1336,11 +1384,11 @@ config_values() {
     [ "$role_effort_ok" = yes ] ||
       die "${role_name}_effort must be one of: $role_domain (the $role_provider effort domain): $role_effort"
   done
-  printf 'execution=%s\ndelivery=%s\nbase=%s\nreview=%s\nmax_lanes=%s\nprd_floor=%s\naudit=%s\naudit_source=%s\nworker=%s\nreviewer=%s\nworker_effort=%s\nreviewer_effort=%s\n' \
+  printf 'execution=%s\ndelivery=%s\nbase=%s\nreview=%s\nmax_lanes=%s\nprd_floor=%s\naudit=%s\naudit_source=%s\nworker=%s\nreviewer=%s\nauditor=%s\nworker_effort=%s\nreviewer_effort=%s\nauditor_effort=%s\n' \
     "$execution" "$delivery" "$base" "$review" "$max_lanes" "$prd_floor" \
     "$audit" "$audit_source" \
-    "$worker_override" "$reviewer_override" \
-    "$worker_effort_override" "$reviewer_effort_override"
+    "$worker_override" "$reviewer_override" "$auditor_override" \
+    "$worker_effort_override" "$reviewer_effort_override" "$auditor_effort_override"
 }
 
 audit_policy() {
@@ -1552,8 +1600,19 @@ route_announce_assignment() {
   done <<ROUTE_ASSIGN_EOF
 $(assign_parse "$1")
 ROUTE_ASSIGN_EOF
-  [ "$route_assignment" = yes ] || return 0
-  printf '%s\n' 'ROUTE-ASSIGN-MODELS -> assign --write (run it before the execution route; it never replaces one)'
+  if [ "$route_assignment" = yes ]; then
+    printf '%s\n' 'ROUTE-ASSIGN-MODELS -> assign --write (run it before the execution route; it never replaces one)'
+  fi
+}
+
+route_announce_audit() {
+  # The audit mode is announced beside the execution route for the same reason
+  # the model assignment is: a manager should not have to notice "leave auditor
+  # off" by reading. It is a run-local decision, so the announcement points at
+  # `audit --mode` and never at a config write.
+  route_audit_mode=$(assign_audit_request "$1") || return 1
+  [ -n "$route_audit_mode" ] || return 0
+  printf 'ROUTE-AUDIT-RUN-LOCAL -> audit --mode %s (this run only; .linchpin.toml is not touched)\n' "$route_audit_mode"
 }
 
 route() {
@@ -1597,6 +1656,7 @@ route() {
   # reviewer and run PRD-007" is an execute intent. Announcing it here is what
   # keeps a manager from noticing the assignment by reading, or not at all.
   route_announce_assignment "$intent" "$config_dir"
+  route_announce_audit "$intent"
   if printf '%s' "$intent" | grep -Eq '(writ(e|ing)|draft(ing)?|author(ing)?|creat(e|ing))([[:space:]]+[a-z]+){0,3}[[:space:]]+prd'; then
     printf '%s\n' 'ROUTE-WRITE-PRD -> prd-creator'
     return
@@ -2025,8 +2085,19 @@ assign_lookup() {
 assign_model_shaped() {
   # A term worth spending a live verification on. A bare English word is not a
   # model name, and probing one costs a request to learn nothing.
+  #
+  # Neither is the PRD the same sentence names. "run PRD-007" and
+  # "docs/PRDs/007.md" put `prd-007` and `007` next to a role word, both carry
+  # digits, and both used to reach the live probe — which refuses the term by
+  # name and stops a request that assigned nothing at all.
   case "$1" in
+    prd-*|*-prd-*|*-prd|prds-*|*-prds-*) return 1 ;;
     gpt-*|codex-*|claude-*|o[0-9]*) return 0 ;;
+  esac
+  # A model name is never only digits.
+  case "$1" in
+    *[!0-9]*) ;;
+    *) return 1 ;;
   esac
   if printf '%s' "$1" | grep -Eq '[0-9]'; then
     return 0
@@ -2090,6 +2161,7 @@ assign_parse() {
     function rolename(w) {
       if (w == "executor" || w == "worker" || w == "implementer" || w == "builder") return "worker"
       if (w == "reviewer" || w == "review" || w == "reviewers" || w == "critic") return "reviewer"
+      if (w == "auditor" || w == "auditors" || w == "audit" || w == "auditing") return "auditor"
       return ""
     }
     function iseffort(w) {
@@ -2157,6 +2229,40 @@ assign_parse() {
       }
     }
   '
+}
+
+assign_audit_request() {
+  # "leave auditor off" is one sentence to a user and an audit-mode decision
+  # plus an execution route underneath. The mode is not a role assignment — it
+  # has no model and no effort — so it is read separately and never written to
+  # `.linchpin.toml`: a run-local override that persists is the one that turns
+  # off the audit on every later batch too.
+  assign_audit_text=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ')
+  assign_audit_found=''
+  if printf '%s' "$assign_audit_text" |
+     grep -Eq "(no|without( an| a| the)?|leave( the)? ?[a-z]* ?|turn( the)?|disable( the)?|skip( the)?)? ?(auditor|audit)( is)? off|no (auditor|audit)|without an? (auditor|audit)|do ?n[o']?t audit|skip the audit"; then
+    assign_audit_found=off
+  fi
+  if printf '%s' "$assign_audit_text" |
+     grep -Eq "(use|with|and|enable|turn on|run)( an| a| the)? (auditor|audit)|(auditor|audit) on|audit (it|this|the batch)"; then
+    if [ -n "$assign_audit_found" ] && [ "$assign_audit_found" != on ]; then
+      die "contradictory audit instructions in one request: it asks for an auditor and for no auditor. Say which one applies; nothing paid is launched until you do."
+    fi
+    assign_audit_found=on
+  fi
+  if printf '%s' "$assign_audit_text" | grep -Eq '(auditor|audit) auto'; then
+    # `auto` is the most specific of the three when it is typed: "using auditor
+    # auto" also contains "auditor", which the `on` pattern matches.
+    assign_audit_found=auto
+  fi
+  [ -z "$assign_audit_found" ] || printf '%s\n' "$assign_audit_found"
+}
+
+assign_persistence_requested() {
+  # Precedence says a repository default changes only when the request says so.
+  # Everything else is this run and this run alone.
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' |
+    grep -Eq 'always|from now on|by default|as the default|set the default|persist|permanently|going forward|for (every|all) runs?'
 }
 
 assign_apply_config() {
@@ -2234,6 +2340,21 @@ assign() {
   trap 'rm -rf -- "$assign_tmp"' EXIT HUP INT TERM
   assign_parse "$assign_text" > "$assign_tmp/roles"
 
+  # The audit mode the sentence asks for, before any role resolution: a
+  # contradictory request has to stop here, not after a model has been probed.
+  assign_audit_mode=$(assign_audit_request "$assign_text")
+  assign_scope=run-local
+  if assign_persistence_requested "$assign_text"; then
+    assign_scope=persistent
+  fi
+  if [ -n "$assign_audit_mode" ]; then
+    # Never a config write. Precedence puts a run override above the repository
+    # setting precisely so the setting survives the run, and the coordinator
+    # carries this into bootstrap state instead.
+    printf 'ASSIGN-AUDIT mode=%s scope=run-local (pass it to `linchpin.sh audit --mode %s`; .linchpin.toml is not touched)\n' \
+      "$assign_audit_mode" "$assign_audit_mode"
+  fi
+
   : > "$assign_tmp/resolved"
   while IFS='|' read -r assign_role assign_effort assign_candidates; do
     [ -n "$assign_role" ] || continue
@@ -2250,6 +2371,13 @@ assign() {
         break
       fi
     done
+    if [ -z "$assign_alias" ] && [ "$assign_role" = auditor ] && [ -n "$assign_audit_mode" ]; then
+      # The role word came from the mode phrase, not from a model assignment.
+      # "leave auditor off" names no auditor model, and hunting for one among
+      # the words beside it is how a request that turned the audit off ends in
+      # `ASSIGN-UNRESOLVED` for a fragment of the PRD path.
+      continue
+    fi
     if [ -z "$assign_alias" ]; then
       # Nothing in a table matched. A model-shaped term still gets verified
       # live, and only a term that verifies on neither provider is refused.
@@ -2280,8 +2408,10 @@ assign() {
   if [ ! -s "$assign_tmp/resolved" ]; then
     # Text naming no assignment is not an error: a caller runs `assign` on every
     # request so the conversational and file paths converge, and most requests
-    # assign nothing.
-    printf 'ASSIGN-NONE no role assignment in the supplied text\n'
+    # assign nothing. A request that set only the audit mode has already been
+    # answered above, and calling that NONE would read as "nothing happened".
+    [ -n "$assign_audit_mode" ] ||
+      printf 'ASSIGN-NONE no role assignment in the supplied text\n'
     return 0
   fi
 
@@ -2297,6 +2427,8 @@ assign() {
     case "$assign_role" in
       worker) assign_current_alias="${cfg_worker_model:-}"; assign_current_effort="$worker_effort"
               assign_current_provider="$worker_provider"; assign_current_slug="$worker_model" ;;
+      auditor) assign_current_alias="${cfg_auditor_model:-}"; assign_current_effort="$auditor_effort"
+               assign_current_provider="$auditor_provider"; assign_current_slug="$auditor_model" ;;
       *) assign_current_alias="${cfg_reviewer_model:-}"; assign_current_effort="$reviewer_effort"
          assign_current_provider="$reviewer_provider"; assign_current_slug="$reviewer_model" ;;
     esac
@@ -2313,13 +2445,24 @@ assign() {
     done
     [ "$assign_effort_ok" = yes ] ||
       die "$assign_role effort '$assign_effort' is outside the $assign_provider effort domain ($assign_domain)"
-    printf 'ASSIGN role=%s alias=%s effort=%s provider=%s model=%s\n' \
-      "$assign_role" "$assign_alias" "$assign_effort" "$assign_provider" "$assign_slug"
-    [ -z "$assign_alias" ] || printf '%s=%s\n' "$assign_role" "$assign_alias" >> "$assign_tmp/pairs"
-    printf '%s_effort=%s\n' "$assign_role" "$assign_effort" >> "$assign_tmp/pairs"
+    # The worker and the reviewer run every lane of every batch, so naming one
+    # is a repository decision and has always been written. The auditor is
+    # spent per batch, and "use Sol high as auditor for this run" says so: it
+    # persists only when the request expresses persistence.
+    assign_role_scope=persistent
+    if [ "$assign_role" = auditor ] && [ "$assign_scope" != persistent ]; then
+      assign_role_scope=run-local
+    fi
+    printf 'ASSIGN role=%s alias=%s effort=%s provider=%s model=%s scope=%s\n' \
+      "$assign_role" "$assign_alias" "$assign_effort" "$assign_provider" "$assign_slug" \
+      "$assign_role_scope"
+    if [ "$assign_role_scope" = persistent ]; then
+      [ -z "$assign_alias" ] || printf '%s=%s\n' "$assign_role" "$assign_alias" >> "$assign_tmp/pairs"
+      printf '%s_effort=%s\n' "$assign_role" "$assign_effort" >> "$assign_tmp/pairs"
+    fi
   done < "$assign_tmp/resolved"
 
-  if [ "$assign_do_write" = yes ]; then
+  if [ "$assign_do_write" = yes ] && [ -s "$assign_tmp/pairs" ]; then
     assign_apply_config "$assign_config_dir/.linchpin.toml" "$assign_tmp/pairs"
     printf 'ASSIGN-WRITTEN %s\n' "$assign_config_dir/.linchpin.toml"
     # The file has to survive the validation every other command applies to it.
@@ -2335,6 +2478,42 @@ preflight_model() {
   # created, and a PASS naming a model the config never asked for is worse than
   # no preflight at all. An ABSENT config is the zero-config default, not an
   # error.
+  preflight_cache_arg=''
+  preflight_bootstrap=''
+  # The auditor is checked only for a run that will actually use one. An
+  # ineligible or `off` run that fails because an unused auditor model is
+  # unavailable has been stopped by a role it was never going to launch, and
+  # `off` is supposed to mean no capability check at all.
+  preflight_audit_eligible=no
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --bootstrap) [ "$#" -ge 2 ] || die 'preflight --bootstrap needs a path'; preflight_bootstrap="$2"; shift 2 ;;
+      --bootstrap=*) preflight_bootstrap="${1#--bootstrap=}"; shift ;;
+      --audit-eligible)
+        [ "$#" -ge 2 ] || die 'preflight --audit-eligible needs yes or no'
+        case "$2" in yes|no) ;; *) die "preflight --audit-eligible is yes or no: $2" ;; esac
+        preflight_audit_eligible="$2"; shift 2 ;;
+      --audit-eligible=*) preflight_audit_eligible="${1#--audit-eligible=}"
+        case "$preflight_audit_eligible" in yes|no) ;; *) die "preflight --audit-eligible is yes or no: $preflight_audit_eligible" ;; esac
+        shift ;;
+      --*) die "unknown preflight option: $1" ;;
+      *)
+        [ -z "$preflight_cache_arg" ] || die "preflight accepts one models cache path: got '$1'"
+        preflight_cache_arg="$1"; shift ;;
+    esac
+  done
+  if [ -n "$preflight_bootstrap" ]; then
+    # The frozen decision, not a second derivation of it. Re-reading the PRD
+    # here would let preflight and the runner disagree about the same batch.
+    require_file "$preflight_bootstrap"
+    command -v jq >/dev/null 2>&1 || die 'jq is required to read frozen bootstrap state'
+    preflight_frozen=$(jq -r '.audit.eligible // "missing"' "$preflight_bootstrap")
+    case "$preflight_frozen" in
+      yes) preflight_audit_eligible=yes ;;
+      no) preflight_audit_eligible=no ;;
+      *) die "bootstrap state carries no resolved audit eligibility: $preflight_bootstrap (run linchpin.sh audit --out first)" ;;
+    esac
+  fi
   load_config "${LINCHPIN_CONFIG_DIR:-$PWD}"
   runtime_metadata
   # Every role that will actually run gets checked, not just the worker. A
@@ -2342,9 +2521,22 @@ preflight_model() {
   # after the run has already spent its worker time.
   preflight_worker_verified=''
   preflight_reviewer_verified=''
+  preflight_auditor_verified=''
+  preflight_roles='worker reviewer'
+  if [ "$preflight_audit_eligible" = yes ]; then
+    preflight_roles='worker reviewer auditor'
+  fi
 
-  if [ "$worker_provider" = codex ] || [ "$reviewer_provider" = codex ]; then
-    cache_path="${1:-${LINCHPIN_MODELS_CACHE:-}}"
+  preflight_needs_codex=no
+  for preflight_role in $preflight_roles; do
+    case "$preflight_role" in
+      worker) [ "$worker_provider" != codex ] || preflight_needs_codex=yes ;;
+      reviewer) [ "$reviewer_provider" != codex ] || preflight_needs_codex=yes ;;
+      auditor) [ "$auditor_provider" != codex ] || preflight_needs_codex=yes ;;
+    esac
+  done
+  if [ "$preflight_needs_codex" = yes ]; then
+    cache_path="${preflight_cache_arg:-${LINCHPIN_MODELS_CACHE:-}}"
     if [ -z "$cache_path" ]; then
       codex_home="${CODEX_HOME:-${HOME:?HOME is required for model preflight}/.codex}"
       cache_path="$codex_home/models_cache.json"
@@ -2367,9 +2559,10 @@ preflight_model() {
     rm -f "$preflight_probe"
   fi
 
-  for preflight_role in worker reviewer; do
+  for preflight_role in $preflight_roles; do
     case "$preflight_role" in
       worker) preflight_provider="$worker_provider"; preflight_slug="$worker_model" ;;
+      auditor) preflight_provider="$auditor_provider"; preflight_slug="$auditor_model" ;;
       *) preflight_provider="$reviewer_provider"; preflight_slug="$reviewer_model" ;;
     esac
     case "$preflight_provider" in
@@ -2415,13 +2608,24 @@ preflight_model() {
     esac
     case "$preflight_role" in
       worker) preflight_worker_verified="$preflight_verified" ;;
+      auditor) preflight_auditor_verified="$preflight_verified" ;;
       *) preflight_reviewer_verified="$preflight_verified" ;;
     esac
   done
 
-  printf 'PREFLIGHT-PASS worker[provider=%s model=%s mechanism=%s verified=%s] reviewer[provider=%s model=%s mechanism=%s verified=%s]\n' \
+  # The auditor's cell says which of the two happened, so a reader can tell an
+  # ineligible run from one whose auditor was checked. `not-eligible` is a
+  # result, not a silence.
+  if [ "$preflight_audit_eligible" = yes ]; then
+    preflight_auditor_cell=$(printf 'auditor[provider=%s model=%s mechanism=%s verified=%s]' \
+      "$auditor_provider" "$auditor_model" "$auditor_mechanism" "$preflight_auditor_verified")
+  else
+    preflight_auditor_cell='auditor[not-eligible: no capability check, probe, or launch for this run]'
+  fi
+  printf 'PREFLIGHT-PASS worker[provider=%s model=%s mechanism=%s verified=%s] reviewer[provider=%s model=%s mechanism=%s verified=%s] %s\n' \
     "$worker_provider" "$worker_model" "$worker_mechanism" "$preflight_worker_verified" \
-    "$reviewer_provider" "$reviewer_model" "$reviewer_mechanism" "$preflight_reviewer_verified"
+    "$reviewer_provider" "$reviewer_model" "$reviewer_mechanism" "$preflight_reviewer_verified" \
+    "$preflight_auditor_cell"
 }
 
 workspace_ignore_one() {
@@ -3253,7 +3457,11 @@ linchpin.sh COMMAND [ARGS]
         stdin; a claude role needs both, a codex role needs neither
   await PIDFILE... [--interval S] [--timeout S]      block until a group's lanes exit
   preflight [MODELS_CACHE.json]                      check every role's model
+        [--bootstrap PATH] [--audit-eligible yes|no]
         codex roles by cache lookup, claude roles by one live probe
+        the auditor is checked only for an eligible run: pass the frozen
+        bootstrap state from `audit --out`, or say so with --audit-eligible.
+        an ineligible run makes zero auditor probes
   help                                               this text
 
 EXECUTION is auto, parallel, or sequential.
@@ -3314,6 +3522,6 @@ case "$command_name" in
   schedule) [ "$#" -ge 3 ] || die 'usage: linchpin.sh schedule EXECUTION WORKTREE_STATUS LANE...'; schedule "$@" ;;
   gate) [ "$#" -eq 2 ] || die 'usage: linchpin.sh gate PRD REPORT'; gate_evidence "$1" "$2" ;;
   audit) [ "$#" -ge 1 ] || die 'usage: linchpin.sh audit PRD... [--mode on|off|auto] [--assess PRD=SCORE:FACTORS] [--out PATH] [--config-dir DIR]'; audit_decision "$@" ;;
-  preflight) [ "$#" -le 1 ] || die 'usage: linchpin.sh preflight [models_cache.json]'; preflight_model "${1:-}" ;;
+  preflight) preflight_model "$@" ;;
   *) usage >&2; exit 1 ;;
 esac

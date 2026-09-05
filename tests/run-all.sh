@@ -32,6 +32,7 @@ provider-invocation.sh
 assign-natural-language.sh
 gate-evidence.sh
 audit-policy.sh
+auditor-runtime.sh
 no-model-escalation.sh
 gates-mode-invariant.sh
 luna-never-native.sh

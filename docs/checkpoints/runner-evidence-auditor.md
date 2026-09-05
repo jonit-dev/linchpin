@@ -73,3 +73,68 @@ sh /tmp/red1/repo/scripts/linchpin.sh audit docs/PRDs/runner-evidence-auditor.md
 The second control is the one that matters: a wrong answer there spends a paid
 audit the user declined. `tests/audit-policy.sh` fails if that patched copy
 still refuses the audit, so the control cannot silently stop proving anything.
+
+## Phase 2: A user can select the auditor and turn it off for one run
+
+**Commands**
+
+| Command | Exit | Result |
+|---|---|---|
+| `sh tests/auditor-runtime.sh` | 0 | `PASS the auditor resolves through the shared registry, is probed only when eligible, and its run-local selection never touches repository config` |
+| `sh tests/provider-preflight.sh` | 0 | unchanged: one probe per distinct claude slug, and still exactly one |
+| `sh tests/assign-natural-language.sh` | 0 | unchanged worker/reviewer sentence behavior |
+| `sh tests/router-matches-intake.sh` | 0 | `ROUTE-AUDIT-RUN-LOCAL` present in both the router and intake |
+| `sh tests/run-all.sh` | 0 | `ALL-TESTS-PASS` (48 tests, `auditor-runtime.sh` registered) |
+| `sh scripts/verify.sh` | 0 | `VERIFY-PASS` |
+
+**Collected test names**
+
+- `should avoid auditor cost when a sentence disables it` — covered by the
+  zero-config `auditor[not-eligible...]` cell, the byte-identical config after
+  three run-local sentences, and the cache-without-astra pair (ineligible passes,
+  eligible refuses by name).
+
+**Ledger rows 2–3 caller census**
+
+```sh
+grep -n 'auditor_provider\|preflight_audit_eligible\|assign_audit_request' scripts/linchpin.sh
+grep -n 'ROUTE-AUDIT-RUN-LOCAL' skills/linchpin/SKILL.md references/intake.md
+```
+
+| Consumer | Line | What it consumes |
+|---|---|---|
+| `scripts/linchpin.sh:2473` | `preflight_model` | eligibility, then the auditor's provider/model — `--bootstrap` reads the frozen decision |
+| `scripts/linchpin.sh:2565` | `preflight_model` role loop | the auditor row, only when the run is eligible |
+| `scripts/linchpin.sh:2234` | `assign_audit_request` | the audit mode a sentence asks for |
+| `scripts/linchpin.sh:2312` | `assign` | the run-local scope that refuses to persist |
+| `scripts/linchpin.sh:1608` | `route_announce_audit` | the `ROUTE-AUDIT-RUN-LOCAL` announcement |
+| `skills/linchpin/SKILL.md:36` | router dispatch table | routes the sentence to `audit --mode`, not to a config write |
+
+**Replaced-path census.** There was no auditor role to replace. What is removed
+is the persistent-only assignment path for a transient request: `assign` used to
+write every resolved role into `.linchpin.toml` unconditionally, and an
+`ASSIGN` line now carries `scope=`, with `run-local` lines excluded from the
+write set. `assign --write` with nothing persistable no longer writes the file
+at all. Worker and reviewer keep the persistent behavior they had; only the
+auditor and the audit mode are run-local by default.
+
+One fix fell out of the sentence path and is worth naming: `assign_model_shaped`
+treated `prd-007` and a bare `007` as model terms, so "execute PRD-007 ... but
+leave auditor off" spent a live probe on a fragment of the PRD path and then
+refused the whole request with `ASSIGN-UNRESOLVED`. A PRD reference is not a
+model name, and a model name is never only digits.
+
+**Revert check.** Removing the router's override transfer breaks the `off` test:
+with `preflight_audit_eligible` defaulting to `yes` in an isolated copy, the
+ineligible run reports a checked auditor, and on a cache without `gpt-6-astra`
+that copy fails a run that should have passed.
+
+**Observed red for gate `auditor-runtime`.** Four controls, all in
+`tests/auditor-runtime.sh`:
+
+| Control | Broken production command | Observed |
+|---|---|---|
+| Force auditor preflight despite off | `sh <copy>/scripts/linchpin.sh preflight <cache>` | reports a checked auditor for an ineligible run |
+| The same copy against a cache without the auditor model | `sh <copy>/scripts/linchpin.sh preflight <cache-with-luna>` | non-zero: a run stopped by a role it never launches |
+| Auditor row deleted from `runtime.md` | `sh <copy>/scripts/linchpin.sh preflight <cache> --audit-eligible yes` | non-zero: the role does not resolve |
+| Contradictory sentence | `sh scripts/linchpin.sh assign 'use an auditor but leave the auditor off'` | non-zero, one clarification, nothing launched |

@@ -11,6 +11,21 @@ own bodies.
 | Manager | `codex` | `gpt-5.6-sol` | `medium` | current Codex session | intake, briefs, scheduling, evidence, integration |
 | Worker | `codex` | `gpt-5.6-luna` | `max` | `codex exec --sandbox danger-full-access` | implementation, repair, tests, conflict resolution |
 | Reviewer | `codex` | `gpt-5.6-sol` | `medium` | `codex exec --sandbox read-only` | one independent review per lane |
+| Auditor | `codex` | `gpt-6-astra` | `medium` | `codex exec --sandbox read-only` | one independent audit of the combined batch |
+
+The Auditor is the batch's last broad independent review, and it is spent by
+declared complexity rather than per run — `references/intake.md` owns the
+`on`/`off`/`auto` table. It runs on `astra` at `medium` because it reads the
+combined result against the original intent, not the code line by line: it
+verifies cross-lane behavior, scope completeness, baseline assumptions, and
+evidence provenance. It never repeats the lane reviewer's work, never repairs
+code, and never approves code written after it ran. There is no automatic model
+escalation into it and none out of it — a role that is not resolving is a
+refusal by name, exactly as a missing default would be.
+
+Its provider, model, and effort resolve through the same Model aliases table and
+the same `.linchpin.toml` keys (`auditor`, `auditor_effort`) as every other
+role. Being the auditor is not a licence to pick a model outside the registry.
 
 PRD authoring uses the current session's selected model and effort directly.
 There is no separate Author pin or authoring subprocess. Upgrade mode and
@@ -77,6 +92,7 @@ about a role changes.
 |---|---|---|
 | Worker mechanism | `codex exec --sandbox danger-full-access` | `claude -p --permission-mode bypassPermissions` |
 | Reviewer mechanism | `codex exec --sandbox read-only` | `claude -p --permission-mode plan --disallowed-tools "Edit Write NotebookEdit"` |
+| Auditor mechanism | `codex exec --sandbox read-only` | `claude -p --permission-mode plan --disallowed-tools "Edit Write NotebookEdit"` |
 | Write access | `--sandbox danger-full-access` | `--permission-mode bypassPermissions` |
 | Read-only access | `--sandbox read-only` | `--disallowed-tools "Edit Write NotebookEdit"` |
 | Working directory | `-C <lane>` | process cwd (`launch --cwd`) |
@@ -152,6 +168,7 @@ a role takes is decided by its resolved provider, never by the manager.
 codex:
 <codex> exec --sandbox danger-full-access --model <Worker.Model> -c 'model_reasoning_effort="<Worker.Effort>"' -C <lane> "$(cat <brief-file>)"
 <codex> exec --model <Reviewer.Model> -c 'model_reasoning_effort="<Reviewer.Effort>"' --sandbox read-only -C <lane> "$(cat <review-file>)"
+<codex> exec --model <Auditor.Model> -c 'model_reasoning_effort="<Auditor.Effort>"' --sandbox read-only -C <repo> "$(cat <audit-file>)"
 <codex> exec resume <session-id> -c sandbox_mode="danger-full-access"
 
 claude:

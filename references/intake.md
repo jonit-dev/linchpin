@@ -18,6 +18,7 @@ by the verification tests.
 | `ROUTE-EXECUTE-UPGRADE` | user explicitly asks to standardize a PRD | any | `migrate`, then `prd-creator` upgrade mode |
 | `ROUTE-EXECUTE-NONE` | "run/execute/start" | no PRD supplied, or a supplied path is not on disk | ask once for the PRD path |
 | `ROUTE-ASSIGN-MODELS` | request names a model, a role assignment, or an effort | any | `assign --write` against the target repository, **before** the execution route |
+| `ROUTE-AUDIT-RUN-LOCAL` | request turns the auditor on, off, or to auto, or names an auditor model "for this run" | any | carry the mode into `audit --mode`; never write it to `.linchpin.toml` |
 | `ROUTE-AMBIGUOUS` | intent cannot be classified | any | ask one short question; never guess |
 
 Intent wins over repository state: three conforming files on disk do not change
@@ -29,6 +30,14 @@ was always going to take: *"use Astra as reviewer and run PRD-007"* is an
 execute intent that happens to reconfigure two keys on the way in. `route`
 prints the `ROUTE-ASSIGN-MODELS` line beside the execution route when it sees an
 assignment, so a manager does not have to notice one by reading.
+
+`ROUTE-AUDIT-RUN-LOCAL` is the same shape and the same non-route:
+*"execute XYZ with @linchpin but leave auditor off"* is an execute intent that
+also sets this run's audit mode. `assign` prints it as `ASSIGN-AUDIT
+mode=off scope=run-local` and writes nothing; `route` announces it beside the
+execution route. The repository default changes only when the request says so
+in words — "always", "by default", "from now on" — which is also the only
+condition under which an auditor model or effort is persisted.
 
 `start`, `begin`, `launch`, and `resume` are execution verbs, not authoring
 verbs. "start PRD 007 to 010" names artifacts the user already wrote, so it takes
@@ -133,15 +142,17 @@ worker = ""           # "" = use the runtime.md pin; an alias, see below
 worker_effort = ""    # "" = use the runtime.md pin; the provider's domain
 reviewer = ""         # "" = use the runtime.md pin; an alias, see below
 reviewer_effort = ""  # "" = use the runtime.md pin; the provider's domain
+auditor = ""          # "" = use the runtime.md pin (astra); an alias, see below
+auditor_effort = ""   # "" = use the runtime.md pin; the provider's domain
 ```
 
-These four keys are how a repository changes which model runs a role, and at
+These six keys are how a repository changes which model runs a role, and at
 what effort, without editing `references/runtime.md` — that file ships inside
 the plugin and an upgrade overwrites it. An unrecognized value fails
 configuration validation rather than reaching a `codex exec` once per lane.
 
-`worker` and `reviewer` take an **alias** from the Model aliases table in
-`references/runtime.md`, never a raw slug. That table is the single place a slug
+`worker`, `reviewer`, and `auditor` take an **alias** from the Model aliases
+table in `references/runtime.md`, never a raw slug. That table is the single place a slug
 appears, so adding a model is one edit. An alias with no row is a configuration
 failure, not a model request that reaches the API.
 
@@ -155,8 +166,8 @@ worker beside a `codex exec --sandbox read-only` reviewer.
 | `codex` | `luna`, `sol`, `terra`, `astra` | `low` `medium` `high` `max` |
 | `claude` | `opus-5`, `opus-4.8`, `sonnet-5`, `haiku-4.5`, `fable-5.1` | `low` `medium` `high` `xhigh` `max` |
 
-`worker_effort` and `reviewer_effort` are validated against the domain of the
-provider that role resolved to, so `xhigh` is accepted for a claude role and
+`worker_effort`, `reviewer_effort`, and `auditor_effort` are validated against
+the domain of the provider that role resolved to, so `xhigh` is accepted for a claude role and
 refused for a codex one. Validating both against one shared list would either
 reject a word Claude Code accepts or pass one codex rejects once per lane.
 
@@ -164,6 +175,15 @@ Preflight then verifies every resolved role before any branch exists: a codex
 role against the local capability cache, a claude role with one live
 `--max-turns 1` probe per distinct model. Either failing is a hard refusal with
 no fallback, exactly as a missing default would be.
+
+The auditor is the exception, and deliberately: it is checked only for a run
+that will actually use one. Pass the frozen decision
+(`preflight --bootstrap <bootstrap.json>`) or say so directly
+(`preflight --audit-eligible yes`). An ineligible or `off` run makes **zero**
+auditor probes and must never fail because an unused auditor model is
+unavailable; an eligible one refuses by name, before implementation starts.
+Selecting an auditor model does not by itself make a run eligible — that is the
+mode's decision, not the role's.
 
 ### Audit mode
 
@@ -235,15 +255,23 @@ refused by name; it is never guessed at and never replaced with a fallback.
 mapping from prose to configuration, so no manager has to improvise it:
 
 - role words: `executor`, `worker`, `implementer`, `builder` → `worker`;
-  `reviewer`, `review`, `critic` → `reviewer`;
+  `reviewer`, `review`, `critic` → `reviewer`; `auditor`, `audit`, `auditing` →
+  `auditor`;
 - model terms are case-folded with spaces and dots turned into hyphens, then
   matched against alias names and slugs, so "Opus 5" and "opus-5" are one term;
 - effort words are the union of both domains, checked against the domain of the
   provider that role resolved to;
-- output is one `ASSIGN role=… alias=… effort=… provider=… model=…` line per
-  role. `--write` updates `worker`, `worker_effort`, `reviewer`, and
+- output is one `ASSIGN role=… alias=… effort=… provider=… model=… scope=…`
+  line per role. `--write` updates `worker`, `worker_effort`, `reviewer`, and
   `reviewer_effort` in `.linchpin.toml`, preserving every other key and creating
   the file when absent; without it `assign` only prints;
+- an `ASSIGN` line at `scope=run-local` is **never written**. The auditor's
+  model and effort are run-local unless the request expresses persistence, and
+  the audit mode is run-local always: it prints as `ASSIGN-AUDIT
+  mode=on|off|auto scope=run-local` and belongs in `audit --mode`, not in a
+  config key;
+- one request that asks for an auditor and for no auditor exits non-zero with a
+  single clarification, before anything paid is launched;
 - text naming no assignment prints `ASSIGN-NONE` and exits `0`, so a caller may
   run it unconditionally;
 - a model term that verifies on neither provider prints `ASSIGN-UNRESOLVED

@@ -33,6 +33,7 @@ machine-checkable preflight, contract, and mode decisions.
 | `ROUTE-EXECUTE-UPGRADE` | user explicitly asks to standardize a PRD | any | `migrate`, then `prd-creator` upgrade mode |
 | `ROUTE-EXECUTE-NONE` | "run/execute/start" | no PRD supplied, or a supplied path is not on disk | ask once for the PRD path |
 | `ROUTE-ASSIGN-MODELS` | request names a model, a role assignment, or an effort | any | `assign --write` against the target repository, **before** the execution route |
+| `ROUTE-AUDIT-RUN-LOCAL` | request turns the auditor on, off, or to auto, or names an auditor model "for this run" | any | carry `ASSIGN-AUDIT` / `ASSIGN role=auditor scope=run-local` into `audit --mode`; write nothing to `.linchpin.toml` |
 | `ROUTE-AMBIGUOUS` | intent cannot be classified | any | ask one short question; never guess |
 
 ## Dispatch procedure
@@ -55,6 +56,21 @@ machine-checkable preflight, contract, and mode decisions.
    refuses a model that verifies on no provider instead of quietly substituting
    one. Assignment is not a route: the request still takes whichever execution
    or authoring route it was always going to take.
+
+   Two of its lines are **run-local and must not be persisted**, and `assign`
+   already refuses to write them for you:
+
+   - `ASSIGN-AUDIT mode=on|off|auto` — the audit mode this one request asked
+     for. Pass it through as `scripts/linchpin.sh audit <prd>... --mode <mode>`
+     and let that decision be frozen in bootstrap state. Do not add an `audit`
+     key to `.linchpin.toml`; the repository default changes only when the
+     request explicitly says it should ("always", "by default", "from now on").
+   - `ASSIGN role=auditor ... scope=run-local` — an auditor model or effort for
+     this batch only. Carry it in the bootstrap state beside the mode.
+
+   A contradictory request — an auditor and no auditor in one sentence — exits
+   non-zero with one short clarification. Ask that question once; do not pick a
+   side, and do not launch anything first.
 1. Run `scripts/linchpin.sh route "<intent>" <prd-path>...` **before** you plan
    or announce anything. `start`, `begin`, `launch`, and `resume` are execution
    verbs. A request naming PRDs that already exist is never an authoring
@@ -66,7 +82,16 @@ machine-checkable preflight, contract, and mode decisions.
 2. Compute the complexity score for build/implement requests. Route scores 1–2
    to a direct edit refusal; route scores 3+ to creator and stop for explicit
    confirmation.
-3. For execute requests, **run the PRDs the user pointed at, as written.** The
+3. Resolve the audit decision before any lane starts:
+   `scripts/linchpin.sh audit <prd>... [--mode <mode from ASSIGN-AUDIT>] --out <bootstrap.json>`.
+   Announce the `AUDIT-MODE` and `AUDIT-ELIGIBLE` lines. `BOOTSTRAP-NEEDS-COMPLEXITY`
+   at exit 3 is yours to resolve — score the PRD with the creator rubric and
+   pass `--assess <path>=SCORE:FACTORS`. Never edit the PRD to add a header, and
+   never ask the user to classify routine work. Then preflight with that frozen
+   state (`preflight --bootstrap <bootstrap.json>`), so an ineligible run makes
+   no auditor probe and an eligible one refuses early if its auditor is
+   unavailable.
+4. For execute requests, **run the PRDs the user pointed at, as written.** The
    `prd_contract: v1` standard applies to PRDs Linchpin authors, not to the
    user's own document. A missing marker, a legacy heading, a prose file list, or
    an absent ledger is an `ADVISORY` line — not a blocker, and not a reason to
@@ -75,9 +100,9 @@ machine-checkable preflight, contract, and mode decisions.
    asks to standardize an artifact. The one real blocker is a path that is not on
    disk: report it and ask once. Never answer an execution request with a
    standards complaint.
-4. For conforming inputs, invoke `prd-swarm-coordinator` with all PRDs. One
+5. For conforming inputs, invoke `prd-swarm-coordinator` with all PRDs. One
    input is still one coordinator lane; there is no separate single path.
-5. Announce any sequential worktree or delivery fallback before it takes effect.
+6. Announce any sequential worktree or delivery fallback before it takes effect.
 
 The direct creator and coordinator skills remain independently discoverable if
 this router is removed. The router is not a gate.
