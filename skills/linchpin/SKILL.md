@@ -37,16 +37,24 @@ machine-checkable preflight, contract, and mode decisions.
 
 ## Dispatch procedure
 
-0. If the request names a model, a role, or an effort — *"use Astra medium as
-   reviewer and Opus 5 medium as executor"* — run
-   `scripts/linchpin.sh assign "<the user's words>" --config-dir <target-repo> --write`
-   first, and announce the `ASSIGN` lines it printed. Do not translate the
-   sentence into config keys yourself: an improvised mapping is the thing this
-   plugin does not accept anywhere else, and `assign` refuses a model that
-   verifies on no provider instead of quietly substituting one. `ASSIGN-NONE`
-   at exit `0` means the request assigned nothing, so running it is always safe.
-   Assignment is not a route: the request still takes whichever execution or
-   authoring route it was always going to take.
+0. **Always** run
+   `scripts/linchpin.sh assign "<the user's exact words>" --config-dir <target-repo> --write`
+   first — not only when you notice a model name in the request. Deciding
+   whether a sentence assigns anything is the parser's job, not yours: it prints
+   `ASSIGN-NONE` and exits `0` when the request assigns nothing, so running it
+   unconditionally costs nothing and never touches the config. When it does
+   resolve something, announce the `ASSIGN` lines verbatim.
+
+   The user should never have to type this command. *"use Linchpin with Astra
+   medium as reviewer and Opus 5 medium as executor, then run PRD-007"* is one
+   sentence to you and two config keys plus an execution route underneath; the
+   whole point of this step is that they say it once and you do the rest.
+
+   Do not translate the sentence into config keys yourself — an improvised
+   mapping is the thing this plugin does not accept anywhere else, and `assign`
+   refuses a model that verifies on no provider instead of quietly substituting
+   one. Assignment is not a route: the request still takes whichever execution
+   or authoring route it was always going to take.
 1. Run `scripts/linchpin.sh route "<intent>" <prd-path>...` **before** you plan
    or announce anything. `start`, `begin`, `launch`, and `resume` are execution
    verbs. A request naming PRDs that already exist is never an authoring

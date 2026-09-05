@@ -143,21 +143,32 @@ The provider travels with the alias — there is no provider key to keep in sync
 Effort is checked against the domain of the provider that role resolved to, so
 `xhigh` is accepted for a Claude role and refused for a Codex one.
 
-You do not have to edit the file. Say what you want:
+**You do not have to edit the file, or run anything.** Say it to `$linchpin`
+along with whatever you actually wanted done:
 
-```sh
-sh scripts/linchpin.sh assign "use Linchpin with Astra medium as reviewer and Opus 5 medium as executor" --config-dir . --write
+```text
+$linchpin use Astra medium as reviewer and Opus 5 medium as executor, then run docs/PRDs/PRD-007.md
 ```
+
+The router resolves the assignment, writes the two keys, announces what it
+resolved, and then runs the PRD. Naming models does not change the route — that
+is still an execute request.
 
 ```text
 ASSIGN role=reviewer alias=astra effort=medium provider=codex model=gpt-6-astra
 ASSIGN role=worker alias=opus-5 effort=medium provider=claude model=claude-opus-5
-ASSIGN-WRITTEN ./.linchpin.toml
 ```
 
 `executor`, `worker`, `implementer` and `builder` all name the worker;
-`reviewer`, `review` and `critic` name the reviewer. Drop `--write` to see what
-it resolved without changing anything.
+`reviewer`, `review` and `critic` name the reviewer.
+
+If you want it in a script instead, that same step is one command. Run it from
+the repo and it writes `./.linchpin.toml`; drop `--write` to see what it
+resolved without changing anything:
+
+```sh
+sh scripts/linchpin.sh assign "use Astra medium as reviewer and Opus 5 medium as executor" --write
+```
 
 **A model that is not in the table is not refused — it is verified.** `assign`
 looks an unknown name up live (the Codex capability cache, or one trivial Claude
