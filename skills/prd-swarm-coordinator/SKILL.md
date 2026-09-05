@@ -57,6 +57,20 @@ ran `sh $S assign "<their words>" --config-dir "$REPO" --write`. If you reached
 here without that, run it before `preflight`, because preflight has to verify
 the models the run will actually use.
 
+Resolve the audit decision in the same breath, before `preflight`, because
+preflight checks the auditor only for a run that will use one:
+
+```sh
+sh $S audit <prd>... [--mode <mode from ASSIGN-AUDIT>] --config-dir "$REPO" --out "$REPO/.linchpin/bootstrap-$TS.json"
+sh $S preflight --bootstrap "$REPO/.linchpin/bootstrap-$TS.json"
+```
+
+Exit `3` with `BOOTSTRAP-NEEDS-COMPLEXITY` is yours to resolve: score that PRD
+with the creator rubric and pass `--assess <path>=SCORE:FACTORS`. Do not edit
+the PRD, and do not ask the user to classify routine work. `ASSIGN-AUDIT` and
+any `scope=run-local` auditor line are run-local — carry them here, never into
+`.linchpin.toml`.
+
 ## Per-group mode selection
 
 `mode` builds the file-intersection graph and emits one group per connected
@@ -153,6 +167,53 @@ sh $S await "$REPO"/.linchpin/lane-*.pid --interval 60
 It blocks until every lane exits and prints one `AWAIT-DONE` per lane. Process
 exit and the real diff are the only two signals worth a turn; announce a lane's
 status when it changes, never on a timer.
+
+## Hand the lifecycle to the runner
+
+`worktree`, `brief`, `launch`, and `await` above are the primitives, and they
+stay. What you should not do is drive them by hand for a whole batch: a manager
+reconstructing each launch command, then spending a model turn per interval
+restating that a lane is still running, is how one field batch spent 954
+thirty-second polls and 739 one-second polls saying nothing. Assemble the plan
+once and hand it over:
+
+```sh
+sh $S run --bootstrap "$REPO/.linchpin/bootstrap-$TS.json"
+# -> RUN-STARTED run=<id> cursor=<n> dir=<repo>/.linchpin/runs/<id>
+sh $S events <id> --repo "$REPO" --after <cursor> --wait
+```
+
+The bootstrap file is the plan you already resolved — repo, base, delivery,
+`max_lanes`, the frozen audit decision, the gate argv, and one entry per lane
+carrying its PRD, its working directory, its brief on stdin where the provider
+needs it there, and its exact command argv. The runner refuses an incomplete one
+rather than guessing a command; that refusal is the point, because a guessed
+command is a lane started in the wrong directory.
+
+`events --wait` blocks **inside the runner** until something actually changes,
+the run reaches a terminal state, or the timeout. Read what comes back:
+
+- `EVENTS-CURSOR` — new events. Act on them, then call again with the new cursor.
+- `EVENTS-HEARTBEAT` — nothing changed. This is a heartbeat, not a question:
+  there is nothing to decide, and the correct next action is the same call
+  again. Do not read a log, do not summarise the wait, do not announce progress
+  that did not happen.
+- `EVENTS-TERMINAL` — the run is `complete` or `blocked`. Go read the state.
+- `decision_required` — the only event that is genuinely yours. Something needs
+  a semantic call: a lane that crashed inside its launch window, an operation
+  whose provider session left no exit receipt. The runner will not relaunch out
+  of that window, and neither should you: reconcile the provider session first.
+  A duplicate paid call is worse than a run that stopped and said what it needs.
+
+`run --resume <id>` reconnects. Two resumes cannot launch the same paid
+operation twice — the second finds the first still running and says
+`RUN-RECONNECTED` — and a resumed lane keeps its operation id, so nothing is
+counted twice. Never work around a blocked run by starting a new one; that
+abandons the durable state that made the resume possible.
+
+The runner is not a decision-maker. It owns process lifecycle, bounded
+scheduling, receipts, and evidence intake. PRD interpretation, integration
+decisions, and repair handoffs stay yours.
 
 ## Run ledger
 

@@ -138,3 +138,69 @@ that copy fails a run that should have passed.
 | The same copy against a cache without the auditor model | `sh <copy>/scripts/linchpin.sh preflight <cache-with-luna>` | non-zero: a run stopped by a role it never launches |
 | Auditor row deleted from `runtime.md` | `sh <copy>/scripts/linchpin.sh preflight <cache> --audit-eligible yes` | non-zero: the role does not resolve |
 | Contradictory sentence | `sh scripts/linchpin.sh assign 'use an auditor but leave the auditor off'` | non-zero, one clarification, nothing launched |
+
+## Phase 3: A resumed run continues without duplicate launches or model polling
+
+**Commands**
+
+| Command | Exit | Result |
+|---|---|---|
+| `sh tests/runner-lifecycle.sh` | 0 | `PASS the runner owns process lifecycle: bounded scheduling, receipts before launches, resume without a second charge, and a wait that costs no inference` (2m03s wall) |
+| `sh tests/run-all.sh` | 0 | `ALL-TESTS-PASS` (49 tests, `runner-lifecycle.sh` registered) |
+| `sh scripts/verify.sh` | 0 | `VERIFY-PASS` |
+
+**Collected test names**
+
+- `should reconnect once when two resumes target a running lane` — one provider
+  invocation, stable `op-lane-a-1`, `attempts` still 1, both resumes reporting
+  `RUN-RECONNECTED`, and a bounded `EVENTS-HEARTBEAT` that asks nothing.
+- Covered alongside it: crash inside the launch window, crash after launch with
+  no exit receipt, duplicate result intake, PID reuse, sequential ordering,
+  monotonic gapless cursors, intent-before-launch for every operation, and eight
+  incomplete-bootstrap refusals.
+
+**Ledger row 4 caller census**
+
+```sh
+grep -n 'runner.sh' scripts/linchpin.sh skills/prd-swarm-coordinator/SKILL.md
+```
+
+| Consumer | Line | What it consumes |
+|---|---|---|
+| `scripts/linchpin.sh:3536` | `run` dispatch | `runner.sh start` / `runner.sh resume` |
+| `scripts/linchpin.sh:3554` | `events` dispatch | `runner.sh events` |
+| `skills/prd-swarm-coordinator/SKILL.md:171` | "Hand the lifecycle to the runner" | `run --bootstrap`, `events --wait`, and how to read each of the four replies |
+
+**Replaced-path census.** `launch` and `await` remain, and the coordinator still
+documents them as the primitives they are — the runner uses the same detach
+mechanism (`setsid`, child-written pid, recorded exit code) rather than a second
+one. What is replaced is the manager driving them for a whole batch: the
+coordinator's wait-and-poll instructions now hand the lifecycle to
+`run --bootstrap` and read `events --wait`, and the four possible replies
+(`EVENTS-CURSOR`, `EVENTS-HEARTBEAT`, `EVENTS-TERMINAL`, `decision_required`)
+say explicitly which of them is the model's to act on. Only `decision_required`
+is.
+
+**What the runner will not do.** It never relaunches out of an ambiguous launch
+window. A child that recorded no pid may have reached the provider and may be
+spending money right now; the operation is marked `launch_uncertain`, the lane
+goes `BLOCKED`, and a `decision_required` event names what has to be reconciled.
+Exactly-once remote execution is not something a local runner can promise
+without a provider idempotency guarantee, and the test asserts the invocation
+count does not move across that resume.
+
+**Revert check.** Disconnecting the run dispatch (removing
+`scripts/audit-policy.sh`'s sibling `scripts/runner.sh`, or the dispatch case)
+leaves `linchpin.sh run` with no lifecycle at all; the public start/resume
+scenario in `tests/runner-lifecycle.sh` fails.
+
+**Observed red for gate `lifecycle`.** `runner_operation_live` is the
+deduplication. Patched to `return 1` in an isolated copy, a live lane reads as a
+dead one:
+
+| Control | Broken production command | Observed |
+|---|---|---|
+| Launch deduplication disabled | `sh <copy>/scripts/linchpin.sh run --resume <id> --repo <repo>` | the same lane invoked the provider **2** times |
+
+The test fails if that copy produces only one invocation, so the control cannot
+quietly stop proving anything.

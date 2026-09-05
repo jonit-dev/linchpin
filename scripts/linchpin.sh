@@ -3424,6 +3424,17 @@ linchpin.sh COMMAND [ARGS]
   mode EXECUTION PRD... [--config-dir DIR]           group lanes by file collision
   schedule EXECUTION STATUS LANE... [--config-dir DIR]
         STATUS: ok | worktree-fail | dirty-tree | unparsed-files | config
+  run --bootstrap PATH [--audit on|off|auto]          start one detached runner
+  run --resume RUN_ID [--repo DIR]                   reconnect to a started run
+        the runner owns process lifecycle, bounded scheduling, and durable state
+        under <repo>/.linchpin/runs/<run-id>/. Two resumes cannot launch the
+        same paid operation twice, and a crash in the launch window is reported
+        rather than relaunched
+  events RUN_ID [--after N] [--wait] [--timeout S]    read the run's event stream
+        [--repo DIR]
+        --wait blocks inside the runner until a state change, a terminal state,
+        or the timeout. A timeout prints EVENTS-HEARTBEAT: a heartbeat, not a
+        question to reason about
   gate PRD REPORT                                    check observed-red evidence
   audit PRD... [--mode on|off|auto] [--out PATH]      say whether this batch is audited
         [--assess PRD=SCORE:FACTORS] [--config-dir DIR]
@@ -3522,6 +3533,25 @@ case "$command_name" in
   schedule) [ "$#" -ge 3 ] || die 'usage: linchpin.sh schedule EXECUTION WORKTREE_STATUS LANE...'; schedule "$@" ;;
   gate) [ "$#" -eq 2 ] || die 'usage: linchpin.sh gate PRD REPORT'; gate_evidence "$1" "$2" ;;
   audit) [ "$#" -ge 1 ] || die 'usage: linchpin.sh audit PRD... [--mode on|off|auto] [--assess PRD=SCORE:FACTORS] [--out PATH] [--config-dir DIR]'; audit_decision "$@" ;;
+  run)
+    # The runner owns the lifecycle; this dispatch is the seam. `--resume` is a
+    # different verb on the same command because a resumed run is the same run:
+    # it reconnects to live operations rather than starting new paid ones.
+    case "${1:-}" in
+      --resume)
+        [ "$#" -ge 2 ] || die 'usage: linchpin.sh run --resume RUN_ID [--repo DIR]'
+        shift
+        sh "$script_dir/runner.sh" resume "$@"
+        ;;
+      --resume=*)
+        run_resume_id="${1#--resume=}"
+        shift
+        sh "$script_dir/runner.sh" resume "$run_resume_id" "$@"
+        ;;
+      *) sh "$script_dir/runner.sh" start "$@" ;;
+    esac
+    ;;
+  events) [ "$#" -ge 1 ] || die 'usage: linchpin.sh events RUN_ID [--repo DIR] [--after N] [--wait] [--timeout S]'; sh "$script_dir/runner.sh" events "$@" ;;
   preflight) preflight_model "$@" ;;
   *) usage >&2; exit 1 ;;
 esac
