@@ -18,9 +18,9 @@ The default split is the whole idea:
 |---|---|---|
 | Write the PRD | you, with whatever model you like (I use Opus 5) | — |
 | Implement the lane | Luna | `max` |
-| Review the lane | Sol, read-only, fresh process | `high` |
+| Review the lane | Sol, read-only, fresh process | `medium` |
 
-Luna at max effort does the building. Sol at high effort checks it, in a
+Luna at max effort does the building. Sol at medium effort checks it, in a
 separate process that cannot write. The model that wrote the code is never the
 model that approves it, and you are not paying manager-tier rates for the part
 that is mostly typing.

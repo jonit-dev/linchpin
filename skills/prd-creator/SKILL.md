@@ -61,10 +61,12 @@ Never edit, move, or overwrite the original; never restate its context, phases,
 or acceptance wording in your own words; never answer a non-conforming PRD by
 drafting a new one. If a gap needs information the document lacks, ask once.
 
-Role and effort pins are owned by `references/runtime.md`. Authoring runs on its
-**Author** row, at higher effort than the manager — a PRD is the decision every
-lane inherits. Read the values there; never copy a slug or effort into this
-file. This skill records checkpoint evidence; it does not spawn review.
+Write the PRD directly in the current session, using the user's currently
+selected model and effort. Do not launch a separate authoring subprocess or
+change models just to use this skill. This applies to new PRDs, upgrade mode,
+and gap-filling passes. Execution and review pins remain owned by
+`references/runtime.md`; they do not select the PRD author. This skill records
+checkpoint evidence; it does not spawn review.
 
 ## The Integration Litmus
 

@@ -27,7 +27,7 @@ table_cell() {
 
 # Every shipped role pin carries a provider, and the shipped set is all codex,
 # so a zero-config run is the single-provider run it always was.
-for shipped_role in Manager Author Worker Reviewer; do
+for shipped_role in Manager Worker Reviewer; do
   role_provider=$(table_cell 'Role pins' "$shipped_role" 3 "$runtime")
   [ "$role_provider" = codex ] ||
     fail "role pin $shipped_role has no codex provider cell: '$role_provider'"
