@@ -25,9 +25,12 @@ table_cell() {
   ' "$4"
 }
 
-# Every shipped role pin carries a provider, and the shipped set is all codex,
-# so a zero-config run is the single-provider run it always was.
-for shipped_role in Manager Worker Reviewer; do
+# Every role this plugin actually launches carries a provider, and the shipped
+# set is all codex, so a zero-config run is the single-provider run it always
+# was. The Manager is deliberately absent: it is the current session, and a
+# provider cell for a process nothing starts is the pin the field sessions
+# disproved. See tests/manager-is-the-current-session.sh.
+for shipped_role in Worker Reviewer Auditor; do
   role_provider=$(table_cell 'Role pins' "$shipped_role" 3 "$runtime")
   [ "$role_provider" = codex ] ||
     fail "role pin $shipped_role has no codex provider cell: '$role_provider'"

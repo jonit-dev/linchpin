@@ -75,13 +75,18 @@ blocked=$(sh "$repo_root/scripts/linchpin.sh" lane "$ledger" lane-1 \
 assert_contains "$blocked" 'LANE-RECORDED lane-1 state=BLOCKED'
 
 # A lane that never reached its cap is untouched by any of this: PARTIAL after
-# one review is an ordinary, resumable state and must stay recordable.
+# one review is an ordinary, resumable state and must stay recordable. It has
+# to be a different PRD, because the budget is the PRD's — see
+# tests/review-budget-per-batch.sh, where a repair lane over the same PRD is
+# refused exactly so a rename cannot refill it.
+second_prd="$tmp_dir/second-prd.md"
+cp "$fixture" "$second_prd"
 sh "$repo_root/scripts/linchpin.sh" lane "$ledger" lane-2 \
-  --set state=RUNNING --set prd="$fixture" --repo "$repo" >/dev/null
-sh "$repo_root/scripts/linchpin.sh" review-brief "$fixture" lane-2 \
+  --set state=RUNNING --set prd="$second_prd" --repo "$repo" >/dev/null
+sh "$repo_root/scripts/linchpin.sh" review-brief "$second_prd" lane-2 \
   --gates "$gates" --commit abc1234 --ledger "$ledger" --out "$tmp_dir/review-lane2.md" >/dev/null
 partial=$(sh "$repo_root/scripts/linchpin.sh" lane "$ledger" lane-2 \
   --set state=PARTIAL --repo "$repo")
 assert_contains "$partial" 'LANE-RECORDED lane-2 state=PARTIAL'
 
-pass 'review rounds are counted in the ledger, capped at two, and an exhausted lane cannot stay PARTIAL'
+pass 'review rounds are counted in the ledger, capped at two per PRD, and an exhausted lane cannot stay PARTIAL'

@@ -16,7 +16,8 @@
 #   run.md            human projection; never a source of approval
 set -eu
 
-runner_self=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/$(basename -- "$0")
+runner_script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+runner_self="$runner_script_dir/$(basename -- "$0")"
 
 runner_die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -230,6 +231,47 @@ runner_bootstrap_validate() {
 
 # ------------------------------------------------------------------- start ---
 
+runner_audit_recompute() {
+  # A run option that changes the audit decision has to change the decision, not
+  # only the word `mode` beside it. The shipped override rewrote the mode and
+  # left `eligible: no, reason: audit disabled` untouched, so a run switched on
+  # by hand carried a frozen "no" through every later check.
+  #
+  # Eligibility is a table over the classes the batch already froze, so it is
+  # recomputed from those rather than from the PRDs again: re-reading a PRD here
+  # would let the runner and the bootstrap disagree about the same batch.
+  runner_recompute_dir="$1"
+  runner_recompute_mode="$2"
+  runner_recompute_classes=$(runner_state_read "$runner_recompute_dir" '.prds[]?.class // empty' | tr '\n' ' ')
+  if [ -n "$(printf '%s' "$runner_recompute_classes" | tr -d ' ')" ]; then
+    # shellcheck disable=SC2086
+    runner_recompute_verdict=$(sh "$runner_script_dir/audit-policy.sh" eligible \
+      "$runner_recompute_mode" $runner_recompute_classes) ||
+      runner_die "run --audit $runner_recompute_mode could not be resolved against the frozen PRD classifications"
+    runner_recompute_eligible=$(printf '%s' "$runner_recompute_verdict" | cut -f1 | sed 's/^eligible=//')
+    runner_recompute_reason=$(printf '%s' "$runner_recompute_verdict" | cut -f2 | sed 's/^reason=//')
+  else
+    # A bootstrap that froze no classifications cannot be re-decided by the auto
+    # table. `on` and `off` still say what they say; `auto` has nothing to
+    # recompute from and is refused rather than guessed.
+    case "$runner_recompute_mode" in
+      on) runner_recompute_eligible=yes
+          runner_recompute_reason='audit is on for this run (run option); one batch audit is required at its checkpoint' ;;
+      off) runner_recompute_eligible=no
+           runner_recompute_reason='audit is off for this run (run option); no auditor capability check, probe, launch, or audit gate' ;;
+      *) runner_die 'run --audit auto needs the PRD classifications the bootstrap freezes; run linchpin.sh audit --out first' ;;
+    esac
+  fi
+  [ "$runner_recompute_eligible" != unresolved ] ||
+    runner_die "run --audit $runner_recompute_mode leaves eligibility unresolved: assess the PRDs with linchpin.sh audit --assess before overriding here"
+  runner_state_update "$runner_recompute_dir" \
+    '.audit = (.audit + {mode: $mode, mode_source: "run-option", eligible: $eligible, reason: $reason})' \
+    --arg mode "$runner_recompute_mode" --arg eligible "$runner_recompute_eligible" \
+    --arg reason "$runner_recompute_reason"
+  runner_event "$runner_recompute_dir" audit_mode_overridden '' \
+    "run --audit $runner_recompute_mode recomputed eligibility to $runner_recompute_eligible: $runner_recompute_reason"
+}
+
 runner_start() {
   runner_bootstrap=''
   runner_audit_override=''
@@ -259,7 +301,7 @@ runner_start() {
 
   # The frozen decisions become state. Nothing downstream re-derives them; that
   # is what frozen is for.
-  jq --arg run "$runner_run" --arg at "$(runner_now)" --arg audit_override "$runner_audit_override" '
+  jq --arg run "$runner_run" --arg at "$(runner_now)" '
     {
       state_contract: "v1",
       run: $run,
@@ -270,9 +312,11 @@ runner_start() {
       base: .base,
       delivery: .delivery,
       max_lanes: .max_lanes,
-      audit: (.audit + (if $audit_override == "" then {} else {mode: $audit_override, mode_source: "run-option"} end)),
+      audit: .audit,
+      roles: (.roles // {}),
       prds: (.prds // []),
       gates: .gates,
+      gate_results: [],
       groups: [ .groups[] | {
         id: .id,
         mode: .mode,
@@ -284,6 +328,7 @@ runner_start() {
       counters: {launch_attempts: 0, completed_reviews: 0, failed_repairs: 0, audit_attempts: 0}
     }' "$runner_bootstrap" | runner_state_write "$runner_run_dir"
   runner_event "$runner_run_dir" run_started '' "bootstrap accepted from $runner_bootstrap"
+  [ -z "$runner_audit_override" ] || runner_audit_recompute "$runner_run_dir" "$runner_audit_override"
   runner_projection "$runner_run_dir"
   runner_supervise_detached "$runner_run_dir"
   printf 'RUN-STARTED run=%s cursor=%s dir=%s\n' "$runner_run" \
@@ -305,7 +350,7 @@ runner_resume() {
   [ -f "$runner_run_dir/state.json" ] || runner_die "no such run: $runner_run (looked in $runner_run_dir)"
   runner_status=$(runner_state_read "$runner_run_dir" '.status')
   case "$runner_status" in
-    complete|blocked)
+    complete|blocked|awaiting_audit)
       printf 'RUN-TERMINAL run=%s status=%s cursor=%s\n' "$runner_run" "$runner_status" \
         "$(runner_cursor_now "$runner_run_dir")"
       return 0
@@ -603,19 +648,200 @@ runner_supervise() {
     runner_projection "$run_dir"
   done
 
-  runner_open=$(jq -r '[.groups[].lanes[] | select(.state == "PENDING" or .state == "RUNNING")] | length' "$run_dir/state.json")
-  runner_blocked=$(jq -r '[.groups[].lanes[] | select(.state == "BLOCKED")] | length' "$run_dir/state.json")
-  if [ "$runner_blocked" -gt 0 ]; then
-    runner_state_update "$run_dir" '.status = "blocked"'
-    runner_event "$run_dir" run_blocked '' "$runner_blocked lane(s) need a decision before this run can continue"
-  elif [ "$runner_open" -eq 0 ]; then
-    runner_state_update "$run_dir" '.status = "complete"'
-    runner_event "$run_dir" run_complete '' 'every lane reached a recorded exit'
-  else
-    runner_state_update "$run_dir" '.status = "blocked"'
-    runner_event "$run_dir" run_blocked '' "$runner_open lane(s) are neither done nor blocked; the supervisor stopped without finishing them"
+  runner_settle "$run_dir"
+}
+
+# ------------------------------------------------------------------- gates ---
+
+runner_run_gates() {
+  # The gate list arrived frozen in the bootstrap and was stored and never run.
+  # A run that never executed the checks its own plan named cannot report
+  # anything about them, and `complete` was read as though it had.
+  #
+  # A gate is `{id, command: [argv...], cwd?, required?}`; a bare argv array is
+  # the same gate with a generated id, because a plan that lists two commands
+  # should not have to invent names for them.
+  runner_gate_dir="$1"
+  runner_gate_repo=$(runner_state_read "$runner_gate_dir" '.repo')
+  runner_gate_count=$(runner_state_read "$runner_gate_dir" '(.gates // []) | length')
+  [ "$runner_gate_count" -gt 0 ] || return 0
+  # Gates run once. A resume that re-ran them would spend the run's own
+  # verification budget on a question already answered, and a flaky gate would
+  # decide the run by whichever attempt came last.
+  if [ "$(runner_state_read "$runner_gate_dir" '(.gate_results // []) | length')" -gt 0 ]; then
+    runner_event "$runner_gate_dir" gates_already_recorded '' \
+      'this run already has gate results; they are not re-run on resume'
+    return 0
   fi
-  runner_projection "$run_dir"
+  mkdir -p "$runner_gate_dir/evidence/gates"
+  runner_gate_index=0
+  runner_gate_failed=0
+  while [ "$runner_gate_index" -lt "$runner_gate_count" ]; do
+    runner_gate_json=$(jq -c --argjson i "$runner_gate_index" '
+      (.gates[$i]) as $g |
+      (if ($g | type) == "array" then {command: $g} else $g end) |
+      {id: (.id // ("gate-" + (($i + 1) | tostring))),
+       command: (.command // []),
+       cwd: (.cwd // ""),
+       required: (if .required == false then false else true end)}' "$runner_gate_dir/state.json")
+    runner_gate_id=$(printf '%s' "$runner_gate_json" | jq -r '.id')
+    runner_gate_required=$(printf '%s' "$runner_gate_json" | jq -r '.required')
+    runner_gate_cwd=$(printf '%s' "$runner_gate_json" | jq -r '.cwd')
+    [ -n "$runner_gate_cwd" ] || runner_gate_cwd="$runner_gate_repo"
+    if [ "$(printf '%s' "$runner_gate_json" | jq -r '.command | length')" -eq 0 ]; then
+      runner_die "gate $runner_gate_id carries no command argv"
+    fi
+    runner_gate_log="$runner_gate_dir/evidence/gates/$runner_gate_id.log"
+    eval "set -- $(printf '%s' "$runner_gate_json" | jq -r '.command | @sh')"
+    runner_gate_exit=0
+    ( cd "$runner_gate_cwd" && "$@" ) > "$runner_gate_log" 2>&1 || runner_gate_exit=$?
+    runner_state_update "$runner_gate_dir" '
+      .gate_results = ((.gate_results // []) + [{
+        id: $id, exit: $exit, required: $required, cwd: $cwd, log: $log, at: $at
+      }])' --arg id "$runner_gate_id" --argjson exit "$runner_gate_exit" \
+      --argjson required "$runner_gate_required" --arg cwd "$runner_gate_cwd" \
+      --arg log "$runner_gate_log" --arg at "$(runner_now)"
+    if [ "$runner_gate_exit" -eq 0 ]; then
+      runner_event "$runner_gate_dir" gate_passed '' "gate $runner_gate_id exit 0"
+    elif [ "$runner_gate_required" = true ]; then
+      runner_gate_failed=$((runner_gate_failed + 1))
+      runner_event "$runner_gate_dir" gate_failed '' \
+        "gate $runner_gate_id exit $runner_gate_exit; evidence in $runner_gate_log"
+    else
+      runner_event "$runner_gate_dir" gate_failed_advisory '' \
+        "gate $runner_gate_id exit $runner_gate_exit (not required); evidence in $runner_gate_log"
+    fi
+    runner_gate_index=$((runner_gate_index + 1))
+  done
+  [ "$runner_gate_failed" -eq 0 ] || return 1
+  return 0
+}
+
+# ------------------------------------------------------- delivery readiness ---
+
+runner_settle() {
+  # Process completion is not task readiness, and the shipped runner reported
+  # one as the other: it declared `complete` as soon as no lane was pending or
+  # running, with the gate list unexecuted, a nonzero lane exit parked in
+  # `PARTIAL`, and `audit_attempts: 0` on an audit-eligible batch. Twelve saved
+  # field states said `complete` that way.
+  #
+  # Readiness is decided here, in order, and each step is refused rather than
+  # assumed: every lane finished cleanly, then the run's own gates, then the
+  # audit receipt an eligible batch requires.
+  runner_settle_dir="$1"
+  runner_settle_open=$(jq -r '[.groups[].lanes[] | select(.state == "PENDING" or .state == "RUNNING")] | length' "$runner_settle_dir/state.json")
+  runner_settle_blocked=$(jq -r '[.groups[].lanes[] | select(.state == "BLOCKED")] | length' "$runner_settle_dir/state.json")
+  # A lane whose command exited nonzero is unfinished. `PARTIAL` was a terminal
+  # word that still permitted completion, which is how a FOLLOWUP run whose lane
+  # exited 1 reported itself finished.
+  runner_settle_partial=$(jq -r '[.groups[].lanes[] | select(.state == "PARTIAL")] | length' "$runner_settle_dir/state.json")
+  if [ "$runner_settle_blocked" -gt 0 ]; then
+    runner_state_update "$runner_settle_dir" '.status = "blocked"'
+    runner_event "$runner_settle_dir" run_blocked '' \
+      "$runner_settle_blocked lane(s) need a decision before this run can continue"
+    runner_projection "$runner_settle_dir"
+    return 0
+  fi
+  if [ "$runner_settle_open" -gt 0 ]; then
+    runner_state_update "$runner_settle_dir" '.status = "blocked"'
+    runner_event "$runner_settle_dir" run_blocked '' \
+      "$runner_settle_open lane(s) are neither done nor blocked; the supervisor stopped without finishing them"
+    runner_projection "$runner_settle_dir"
+    return 0
+  fi
+  if [ "$runner_settle_partial" -gt 0 ]; then
+    runner_state_update "$runner_settle_dir" '.status = "blocked"'
+    runner_event "$runner_settle_dir" run_blocked '' \
+      "$runner_settle_partial lane(s) exited nonzero; a PARTIAL lane is unfinished work, not a finished run"
+    runner_projection "$runner_settle_dir"
+    return 0
+  fi
+  if ! runner_run_gates "$runner_settle_dir"; then
+    runner_state_update "$runner_settle_dir" '.status = "blocked"'
+    runner_event "$runner_settle_dir" run_blocked '' \
+      'a required gate failed; the run is not deliverable on its own declared checks'
+    runner_projection "$runner_settle_dir"
+    return 0
+  fi
+  if [ "$(runner_state_read "$runner_settle_dir" '.audit.eligible')" = yes ] &&
+     [ "$(runner_state_read "$runner_settle_dir" '.audit.receipt.verdict // ""')" = '' ]; then
+    runner_state_update "$runner_settle_dir" '.status = "awaiting_audit"'
+    runner_event "$runner_settle_dir" audit_required '' \
+      "this batch is audit-eligible and has no audit receipt: launch the auditor with linchpin.sh role-command auditor, then record it with linchpin.sh audit-receipt $(runner_state_read "$runner_settle_dir" '.run')"
+    runner_projection "$runner_settle_dir"
+    return 0
+  fi
+  if [ "$(runner_state_read "$runner_settle_dir" '.audit.receipt.verdict // ""')" = fail ]; then
+    runner_state_update "$runner_settle_dir" '.status = "blocked"'
+    runner_event "$runner_settle_dir" run_blocked '' 'the recorded audit verdict is fail'
+    runner_projection "$runner_settle_dir"
+    return 0
+  fi
+  runner_state_update "$runner_settle_dir" '.status = "complete"'
+  runner_event "$runner_settle_dir" run_complete '' \
+    'every lane exited clean, every required gate passed, and any required audit is receipted'
+  runner_projection "$runner_settle_dir"
+}
+
+runner_audit_receipt() {
+  # The audit was launched outside the runner in every field batch that had one,
+  # so the durable state neither required nor recorded it. A receipt is how the
+  # work gets back into the record: it names the session that produced it, so
+  # "an auditor ran" is a checkable claim rather than a remembered one.
+  runner_receipt_run="$1"
+  shift
+  runner_repo="$PWD"
+  runner_receipt_session=''
+  runner_receipt_verdict=''
+  runner_receipt_evidence=''
+  runner_receipt_extend=no
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --repo) [ "$#" -ge 2 ] || runner_die 'audit-receipt --repo needs a directory'; runner_repo="$2"; shift 2 ;;
+      --repo=*) runner_repo="${1#--repo=}"; shift ;;
+      --session) [ "$#" -ge 2 ] || runner_die 'audit-receipt --session needs a session id'; runner_receipt_session="$2"; shift 2 ;;
+      --session=*) runner_receipt_session="${1#--session=}"; shift ;;
+      --verdict) [ "$#" -ge 2 ] || runner_die 'audit-receipt --verdict needs pass or fail'; runner_receipt_verdict="$2"; shift 2 ;;
+      --verdict=*) runner_receipt_verdict="${1#--verdict=}"; shift ;;
+      --evidence) [ "$#" -ge 2 ] || runner_die 'audit-receipt --evidence needs a path'; runner_receipt_evidence="$2"; shift 2 ;;
+      --evidence=*) runner_receipt_evidence="${1#--evidence=}"; shift ;;
+      --extend) runner_receipt_extend=yes; shift ;;
+      *) runner_die "unknown audit-receipt option: $1" ;;
+    esac
+  done
+  [ -n "$runner_receipt_session" ] ||
+    runner_die 'audit-receipt --session ID: an audit nothing can identify is an audit nobody can check'
+  case "$runner_receipt_verdict" in
+    pass|fail) ;;
+    *) runner_die 'audit-receipt --verdict is pass or fail' ;;
+  esac
+  [ -z "$runner_receipt_evidence" ] || [ -f "$runner_receipt_evidence" ] ||
+    runner_die "audit-receipt --evidence names no file: $runner_receipt_evidence"
+  runner_run_dir=$(run_dir_for "$runner_repo" "$runner_receipt_run")
+  [ -f "$runner_run_dir/state.json" ] ||
+    runner_die "no such run: $runner_receipt_run (looked in $runner_run_dir)"
+  [ "$(runner_state_read "$runner_run_dir" '.audit.eligible')" = yes ] ||
+    runner_die "this run is not audit-eligible, so an audit receipt has nothing to close: $runner_receipt_run"
+  # One audit per batch. One FOLLOWUP manager launched three at the same batch;
+  # the allowance is the same kind of budget as the lane review cap, and a
+  # second one is spent on purpose or not at all.
+  runner_receipt_attempts=$(runner_state_read "$runner_run_dir" '.counters.audit_attempts // 0')
+  if [ "$runner_receipt_attempts" -ge 1 ] && [ "$runner_receipt_extend" != yes ]; then
+    runner_die "this batch has already recorded $runner_receipt_attempts audit(s) (session $(runner_state_read "$runner_run_dir" '.audit.receipt.session // "unknown"')). One audit per batch: pass --extend to say you are deliberately spending another, or read the one you have."
+  fi
+  runner_state_update "$runner_run_dir" '
+    .audit.receipt = {session: $session, verdict: $verdict, evidence: $evidence, at: $at}
+    | .audit.receipts = ((.audit.receipts // []) + [{session: $session, verdict: $verdict, at: $at}])
+    | .counters.audit_attempts = ((.counters.audit_attempts // 0) + 1)' \
+    --arg session "$runner_receipt_session" --arg verdict "$runner_receipt_verdict" \
+    --arg evidence "$runner_receipt_evidence" --arg at "$(runner_now)"
+  runner_event "$runner_run_dir" audit_recorded '' \
+    "session $runner_receipt_session verdict $runner_receipt_verdict"
+  runner_settle "$runner_run_dir"
+  printf 'AUDIT-RECEIPT-RECORDED run=%s session=%s verdict=%s status=%s\n' \
+    "$runner_receipt_run" "$runner_receipt_session" "$runner_receipt_verdict" \
+    "$(runner_state_read "$runner_run_dir" '.status')"
 }
 
 runner_drain() {
@@ -675,7 +901,10 @@ runner_events() {
       return 0
     fi
     case "$runner_status" in
-      complete|blocked)
+      complete|blocked|awaiting_audit)
+        # `awaiting_audit` is terminal for the waiter and not for the run: the
+        # supervisor has nothing left to do and the next move is a person's, so
+        # blocking here would be a wait on an event that cannot arrive.
         printf 'EVENTS-TERMINAL run=%s status=%s cursor=%s\n' "$runner_run" "$runner_status" "$runner_after"
         return 0
         ;;
@@ -709,5 +938,8 @@ case "$runner_command" in
   resume) [ "$#" -ge 1 ] || runner_die 'usage: runner.sh resume RUN_ID [--repo DIR]'; runner_resume "$@" ;;
   supervise) [ "$#" -eq 1 ] || runner_die 'usage: runner.sh supervise RUN_DIR'; runner_supervise "$1" ;;
   events) [ "$#" -ge 1 ] || runner_die 'usage: runner.sh events RUN_ID [--repo DIR] [--after N] [--wait] [--timeout S]'; runner_events "$@" ;;
-  *) runner_die 'usage: runner.sh start|resume|supervise|events ...' ;;
+  audit-receipt)
+    [ "$#" -ge 1 ] || runner_die 'usage: runner.sh audit-receipt RUN_ID --session ID --verdict pass|fail [--repo DIR] [--evidence PATH] [--extend]'
+    runner_audit_receipt "$@" ;;
+  *) runner_die 'usage: runner.sh start|resume|supervise|events|audit-receipt ...' ;;
 esac

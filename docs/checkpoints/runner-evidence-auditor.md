@@ -204,3 +204,74 @@ dead one:
 
 The test fails if that copy produces only one invocation, so the control cannot
 quietly stop proving anything.
+
+## Audit remediation: docs/codex-session-audit-2026-09-06.md
+
+Not a PRD phase. A Codex session audit of v0.13.0 (`661a9c8`) reproduced five
+defects across phases the PRD had planned and the implementation had not
+reached. This records the fix for each finding it named, and says plainly which
+PRD phases are still open afterwards.
+
+**Commands**
+
+| Command | Exit | Result |
+|---|---|---|
+| `sh tests/runner-completion-requires-evidence.sh` | 0 | `PASS run completion requires its gates, its lane exits, and its audit receipt` |
+| `sh tests/run-local-auditor-carried.sh` | 0 | `PASS a run-local auditor survives assign, bootstrap, and preflight as one object` |
+| `sh tests/role-command-enforces-sandbox.sh` | 0 | `PASS role commands carry their own sandbox, model, and effort` |
+| `sh tests/review-budget-per-batch.sh` | 0 | `PASS the review budget is keyed to the PRD, so a lane rename cannot refill it` |
+| `sh tests/manager-is-the-current-session.sh` | 0 | `PASS the manager is described as the current session, not pinned to a model it never runs` |
+| `sh scripts/verify.sh` | 0 | `VERIFY-PASS contract references, runtime safety, manifest, delegation, and model preflight` |
+| every test in `tests/run-all.sh` except `import-fidelity.sh` | 0 | 52 tests, all passing |
+
+`tests/import-fidelity.sh` is not run here and is not claimed. It compares the
+imported skills against live files under `$HOME`, and the local
+`~/.claude/skills/prd-executor/SKILL.md` has drifted from the recorded baseline;
+it fails identically on a clean checkout of `661a9c8` with no changes applied.
+
+**Observed red, per finding.** Every test above was written first and run
+against the unmodified scripts. The five recorded reds:
+
+| Finding | Observed against v0.13.0 |
+|---|---|
+| 1 | `FAIL an audit-eligible run with no audit receipt reached complete` |
+| 2 | `FAIL missing expected text: ASSIGN-RUN-LOCAL audit --auditor sol --auditor-effort high` |
+| 3 | `ERROR: usage: ...` — `role-command` did not exist |
+| 4 | `REVIEW-BRIEF-WRITTEN ... round=1/2` — the renamed repair lane got a fresh budget |
+| 5 | `FAIL the Manager row still pins a model slug it cannot enforce` |
+
+**Test changed rather than added.** `tests/one-review-per-lane.sh` ended by
+reviewing a second lane over the *same* PRD and asserting it succeeded. Under
+the PRD-keyed budget it must not, so that lane now carries its own PRD, and the
+same-PRD case moved to `tests/review-budget-per-batch.sh` where it is the thing
+under test. `tests/provider-registry.sh` no longer requires a provider cell on
+the Manager row, and `tests/auditor-runtime.sh` expects the effort now present
+in the preflight auditor cell.
+
+**Ledger callers resolved by this work**
+
+| Consumer | What it consumes |
+|---|---|
+| `scripts/linchpin.sh` `audit-receipt` dispatch | `runner.sh audit-receipt` |
+| `scripts/linchpin.sh` `role-command` dispatch | `role_command` |
+| `scripts/linchpin.sh` `preflight --bootstrap` | the frozen `.roles` object |
+| `scripts/runner.sh` `runner_settle` | `.gates`, `.audit.eligible`, `.audit.receipt` |
+| `scripts/runner.sh` `runner_audit_recompute` | `audit-policy.sh eligible` over `.prds[].class` |
+| `skills/prd-swarm-coordinator/SKILL.md` | `role-command`, `audit-receipt`, the `awaiting_audit` reply |
+
+**Revert check.** Restoring the old terminal block in `runner_supervise` —
+`complete` whenever no lane is pending or running — makes all four scenarios in
+`tests/runner-completion-requires-evidence.sh` fail. Removing the `.roles`
+branch from `preflight_model` makes `tests/run-local-auditor-carried.sh` report
+the default auditor. Reverting `run_ledger_prd_rounds` to the per-row count
+makes the renamed repair lane in `tests/review-budget-per-batch.sh` succeed.
+
+**What this does not close.** PRD phases 4, 7, and 8 remain open, and no part of
+this work should be read as completing them. There is no `scripts/evidence.sh`,
+no commit-bound findings or stale-evidence rejection (phase 4), no usage or
+audit-value reporting (phase 7), and no end-to-end proof of the documented flow
+against a real batch (phase 8). Phase 5's budget is now keyed to the PRD but is
+still counted at packet generation rather than at a typed completed verdict, and
+phase 6's audit checkpoint exists as a required receipt rather than as a runner
+that launches, coalesces, and closes the audit itself. What changed is that a
+run can no longer report itself finished while those gaps are open.

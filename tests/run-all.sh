@@ -34,6 +34,11 @@ gate-evidence.sh
 audit-policy.sh
 auditor-runtime.sh
 runner-lifecycle.sh
+runner-completion-requires-evidence.sh
+run-local-auditor-carried.sh
+role-command-enforces-sandbox.sh
+review-budget-per-batch.sh
+manager-is-the-current-session.sh
 no-model-escalation.sh
 gates-mode-invariant.sh
 luna-never-native.sh

@@ -1166,17 +1166,31 @@ review_brief() {
   [ -n "$round_recorded" ] || round_recorded=0
   printf '%s\n' "$round_recorded" | grep -Eq '^[0-9]+$' ||
     die "ledger review_rounds is not a number for lane $lane_id: $round_recorded"
-  round_next=$((round_recorded + 1))
+
+  # The budget belongs to the PRD, not to the lane id. Keyed per row, it was
+  # keyed to a name the manager chooses: one field ledger carried five
+  # successive lanes for a single source PRD — repair and supersession lanes,
+  # not five PRDs — whose rounds summed to eight, corroborated by eight distinct
+  # reviewer sessions. Every lane passed its own cap. Renaming the lane must not
+  # refill the budget, so the rows sharing this PRD are counted together.
+  run_ledger_prd_rounds "$ledger_file" "$prd" > "$review_tmp/siblings"
+  batch_recorded=$(awk -F '\t' -v self="$lane_id" '$1 != self { total += $2 } END { print total + 0 }' "$review_tmp/siblings")
+  batch_spent=$((batch_recorded + round_recorded))
+  round_next=$((batch_spent + 1))
   if [ "$round_next" -gt "$review_round_cap" ]; then
-    die "review round $round_next refused: lane $lane_id has already had $round_recorded reviews and the cap is $review_round_cap. A defect that survives $review_round_cap reviews is a specification problem, not a repair problem — record the lane BLOCKED with its reason and resume command, or narrow the PRD and start a new lane. Another round finds another defect; that is what the last $round_recorded did."
+    review_spenders=$(awk -F '\t' '$2 > 0 { printf "%s(%s) ", $1, $2 }' "$review_tmp/siblings")
+    [ -n "$review_spenders" ] || review_spenders="$lane_id($round_recorded) "
+    die "review round $round_next refused: $prd has already had $batch_spent review(s) across ${review_spenders}and the cap is $review_round_cap per PRD. The budget follows the PRD, so a repair lane under a new id does not refill it. A defect that survives $review_round_cap reviews is a specification problem, not a repair problem — record the lane BLOCKED with its reason and resume command, or narrow the PRD and start a new one."
   fi
   if [ "$round_next" -gt 1 ] && [ "$round_requested" != "$round_next" ]; then
-    die "lane $lane_id already has $round_recorded review(s) recorded, so a further one is not automatic: pass --round $round_next to say you are deliberately spending the last review on this lane"
+    die "$prd already has $batch_spent review(s) recorded across its lanes, so a further one is not automatic: pass --round $round_next to say you are deliberately spending the last review on this PRD"
   fi
   # Record before emitting. A brief that exists against a count that was never
-  # incremented is the same unbounded loop with one extra step in it.
-  ( lane_record "$ledger_file" "$lane_id" \
-      --set review_rounds="$round_next" --set review_used=true >/dev/null ) ||
+  # incremented is the same unbounded loop with one extra step in it. The PRD is
+  # recorded with the round, or the next lane cannot find the budget this one
+  # spent.
+  ( lane_record "$ledger_file" "$lane_id" --set prd="$prd" \
+      --set review_rounds="$((round_recorded + 1))" --set review_used=true >/dev/null ) ||
     die "review-brief could not record round $round_next in $ledger_file: fix the lane row first"
 
   # The packet names the providers that ran the lane, so it has to resolve the
@@ -1403,6 +1417,13 @@ audit_decision() {
   audit_mode_request=''
   audit_config_dir="${LINCHPIN_CONFIG_DIR:-$PWD}"
   audit_out=''
+  # A run-local auditor is resolved here or nowhere. `assign` could name Sol at
+  # high effort and print it, and nothing downstream could read the answer: the
+  # bootstrap carried policy only, and preflight fell back to the repository
+  # default. The selection has to enter the frozen state at the same moment the
+  # eligibility does, or the two describe different runs.
+  audit_auditor_alias=''
+  audit_auditor_effort=''
   audit_tmp=$(mktemp -d "${TMPDIR:-/tmp}/linchpin-audit.XXXXXX")
   trap 'rm -rf -- "$audit_tmp"' EXIT HUP INT TERM
   : > "$audit_tmp/prds"
@@ -1450,11 +1471,23 @@ audit_decision() {
         shift 2
         ;;
       --out=*) audit_out="${1#--out=}"; shift ;;
+      --auditor)
+        [ "$#" -ge 2 ] || die 'audit --auditor needs a model alias'
+        audit_auditor_alias="$2"
+        shift 2
+        ;;
+      --auditor=*) audit_auditor_alias="${1#--auditor=}"; shift ;;
+      --auditor-effort)
+        [ "$#" -ge 2 ] || die 'audit --auditor-effort needs an effort word'
+        audit_auditor_effort="$2"
+        shift 2
+        ;;
+      --auditor-effort=*) audit_auditor_effort="${1#--auditor-effort=}"; shift ;;
       --*) die "unknown audit option: $1" ;;
       *) printf '%s\n' "$1" >> "$audit_tmp/prds"; shift ;;
     esac
   done
-  [ -s "$audit_tmp/prds" ] || die 'usage: linchpin.sh audit PRD... [--mode on|off|auto] [--assess PRD=SCORE:FACTORS] [--out PATH] [--config-dir DIR]'
+  [ -s "$audit_tmp/prds" ] || die 'usage: linchpin.sh audit PRD... [--mode on|off|auto] [--assess PRD=SCORE:FACTORS] [--auditor ALIAS] [--auditor-effort EFFORT] [--out PATH] [--config-dir DIR]'
   load_config "$audit_config_dir"
   # Precedence, once, in one place: an explicit run override, then the
   # repository setting, then the shipped default. A run override is never
@@ -1568,13 +1601,51 @@ audit_decision() {
       jq -R -s 'split("\n") | map(select(length > 0) | split("\t") |
         {path: .[0], score: .[1], class: .[2], source: .[3], note: .[4]})'
     )
+    # Every role that will run, serialized once, as the object preflight and the
+    # launch both read. Two derivations of "which auditor" is how a manager
+    # preflights Astra and launches Sol.
+    runtime_metadata
+    audit_auditor_scope=repository
+    if [ -n "$audit_auditor_alias" ]; then
+      audit_auditor_row=$(resolve_model "$audit_auditor_alias")
+      [ -n "$audit_auditor_row" ] ||
+        die "unknown auditor alias: $audit_auditor_alias (see the Model aliases table in references/runtime.md)"
+      auditor_provider=$(resolve_field "$audit_auditor_row" 1)
+      auditor_model=$(resolve_field "$audit_auditor_row" 2)
+      auditor_mechanism=$(provider_cell 'Auditor mechanism' "$auditor_provider")
+      audit_auditor_scope=run-local
+    fi
+    if [ -n "$audit_auditor_effort" ]; then
+      audit_auditor_domain=$(effort_domain "$auditor_provider")
+      audit_auditor_effort_ok=no
+      for audit_effort_word in $audit_auditor_domain; do
+        [ "$audit_effort_word" != "$audit_auditor_effort" ] || audit_auditor_effort_ok=yes
+      done
+      [ "$audit_auditor_effort_ok" = yes ] ||
+        die "auditor effort '$audit_auditor_effort' is outside the $auditor_provider effort domain ($audit_auditor_domain)"
+      auditor_effort="$audit_auditor_effort"
+      audit_auditor_scope=run-local
+    fi
+    audit_roles_json=$(jq -n \
+      --arg wp "$worker_provider" --arg wm "$worker_model" --arg we "$worker_effort" --arg wx "$worker_mechanism" \
+      --arg rp "$reviewer_provider" --arg rm "$reviewer_model" --arg re "$reviewer_effort" --arg rx "$reviewer_mechanism" \
+      --arg ap "$auditor_provider" --arg am "$auditor_model" --arg ae "$auditor_effort" --arg ax "$auditor_mechanism" \
+      --arg ascope "$audit_auditor_scope" '{
+        worker: {provider: $wp, model: $wm, effort: $we, mechanism: $wx, scope: "repository"},
+        reviewer: {provider: $rp, model: $rm, effort: $re, mechanism: $rx, scope: "repository"},
+        auditor: {provider: $ap, model: $am, effort: $ae, mechanism: $ax, scope: $ascope}
+      }')
     jq -n --arg mode "$audit_mode" --arg mode_source "$audit_mode_source" \
       --arg eligible "$audit_eligible" --arg reason "$audit_reason" \
-      --argjson prds "$audit_prd_json" '{
+      --argjson prds "$audit_prd_json" --argjson roles "$audit_roles_json" '{
         bootstrap_contract: "v1",
         audit: {mode: $mode, mode_source: $mode_source, eligible: $eligible, reason: $reason},
+        roles: $roles,
         prds: $prds
       }' > "$audit_out"
+    printf 'AUDIT-ROLES worker=%s/%s reviewer=%s/%s auditor=%s/%s scope=%s\n' \
+      "$worker_model" "$worker_effort" "$reviewer_model" "$reviewer_effort" \
+      "$auditor_model" "$auditor_effort" "$audit_auditor_scope"
     printf 'AUDIT-FROZEN %s\n' "$audit_out"
   fi
 }
@@ -2459,6 +2530,13 @@ assign() {
     if [ "$assign_role_scope" = persistent ]; then
       [ -z "$assign_alias" ] || printf '%s=%s\n' "$assign_role" "$assign_alias" >> "$assign_tmp/pairs"
       printf '%s_effort=%s\n' "$assign_role" "$assign_effort" >> "$assign_tmp/pairs"
+    else
+      # A run-local assignment that only gets printed is the one nothing
+      # downstream can read. `audit --out` is the single place a run-local role
+      # enters frozen state, so the resolution is handed back as the exact flags
+      # that put it there rather than as prose telling a manager to carry it.
+      printf 'ASSIGN-RUN-LOCAL audit --auditor %s --auditor-effort %s (pass these to the audit call that writes --out; .linchpin.toml is not touched)\n' \
+        "$assign_alias" "$assign_effort"
     fi
   done < "$assign_tmp/resolved"
 
@@ -2516,6 +2594,35 @@ preflight_model() {
   fi
   load_config "${LINCHPIN_CONFIG_DIR:-$PWD}"
   runtime_metadata
+  if [ -n "$preflight_bootstrap" ] && [ "$(jq -r 'has("roles")' "$preflight_bootstrap")" = true ]; then
+    # The frozen roles win over the repository config, because they are what the
+    # run will actually launch. A run-local auditor that preflight re-derives
+    # from config is the disconnect this consumes: the manager preflighted Astra
+    # and then launched the auditor it had been asked for by hand.
+    for preflight_frozen_role in worker reviewer auditor; do
+      preflight_frozen_provider=$(jq -r --arg r "$preflight_frozen_role" '.roles[$r].provider // ""' "$preflight_bootstrap")
+      preflight_frozen_model=$(jq -r --arg r "$preflight_frozen_role" '.roles[$r].model // ""' "$preflight_bootstrap")
+      preflight_frozen_effort=$(jq -r --arg r "$preflight_frozen_role" '.roles[$r].effort // ""' "$preflight_bootstrap")
+      [ -n "$preflight_frozen_provider" ] && [ -n "$preflight_frozen_model" ] && [ -n "$preflight_frozen_effort" ] ||
+        die "bootstrap state froze an incomplete $preflight_frozen_role role: $preflight_bootstrap (provider, model, and effort are all required)"
+      case "$preflight_frozen_role" in
+        worker) preflight_frozen_cell='Worker mechanism' ;;
+        reviewer) preflight_frozen_cell='Reviewer mechanism' ;;
+        auditor) preflight_frozen_cell='Auditor mechanism' ;;
+      esac
+      preflight_frozen_mechanism=$(provider_cell "$preflight_frozen_cell" "$preflight_frozen_provider")
+      [ -n "$preflight_frozen_mechanism" ] ||
+        die "bootstrap state names a provider with no $preflight_frozen_role mechanism: $preflight_frozen_provider"
+      case "$preflight_frozen_role" in
+        worker) worker_provider="$preflight_frozen_provider"; worker_model="$preflight_frozen_model"
+                worker_effort="$preflight_frozen_effort"; worker_mechanism="$preflight_frozen_mechanism" ;;
+        reviewer) reviewer_provider="$preflight_frozen_provider"; reviewer_model="$preflight_frozen_model"
+                  reviewer_effort="$preflight_frozen_effort"; reviewer_mechanism="$preflight_frozen_mechanism" ;;
+        auditor) auditor_provider="$preflight_frozen_provider"; auditor_model="$preflight_frozen_model"
+                 auditor_effort="$preflight_frozen_effort"; auditor_mechanism="$preflight_frozen_mechanism" ;;
+      esac
+    done
+  fi
   # Every role that will actually run gets checked, not just the worker. A
   # reviewer model that cannot be verified fails at the first lane's review,
   # after the run has already spent its worker time.
@@ -2617,15 +2724,165 @@ preflight_model() {
   # ineligible run from one whose auditor was checked. `not-eligible` is a
   # result, not a silence.
   if [ "$preflight_audit_eligible" = yes ]; then
-    preflight_auditor_cell=$(printf 'auditor[provider=%s model=%s mechanism=%s verified=%s]' \
-      "$auditor_provider" "$auditor_model" "$auditor_mechanism" "$preflight_auditor_verified")
+    preflight_auditor_cell=$(printf 'auditor[provider=%s model=%s effort=%s mechanism=%s verified=%s]' \
+      "$auditor_provider" "$auditor_model" "$auditor_effort" "$auditor_mechanism" "$preflight_auditor_verified")
   else
     preflight_auditor_cell='auditor[not-eligible: no capability check, probe, or launch for this run]'
   fi
-  printf 'PREFLIGHT-PASS worker[provider=%s model=%s mechanism=%s verified=%s] reviewer[provider=%s model=%s mechanism=%s verified=%s] %s\n' \
-    "$worker_provider" "$worker_model" "$worker_mechanism" "$preflight_worker_verified" \
-    "$reviewer_provider" "$reviewer_model" "$reviewer_mechanism" "$preflight_reviewer_verified" \
+  # The manager is reported, not verified. It is the session already running
+  # this command: there is no second process to check, and the role pins table
+  # used to claim a manager model that nineteen matched field sessions did not
+  # run. A cell that says what is true beats a pin nothing can enforce.
+  printf 'PREFLIGHT-PASS manager[current session; reported, not pinned] worker[provider=%s model=%s effort=%s mechanism=%s verified=%s] reviewer[provider=%s model=%s effort=%s mechanism=%s verified=%s] %s\n' \
+    "$worker_provider" "$worker_model" "$worker_effort" "$worker_mechanism" "$preflight_worker_verified" \
+    "$reviewer_provider" "$reviewer_model" "$reviewer_effort" "$reviewer_mechanism" "$preflight_reviewer_verified" \
     "$preflight_auditor_cell"
+}
+
+role_command() {
+  # Nobody assembles a role launch by hand. One FOLLOWUP manager launched three
+  # Astra auditors through native `multi_agent_v1__spawn_agent` with
+  # `fork_context: true`; the prompts said read-only and the enforced sandbox
+  # said `danger-full-access`. A read-only instruction inside a prompt is not a
+  # read-only process, and prose is what a manager improvises around.
+  #
+  # So the sandbox, the model, and the effort are properties of the role, and
+  # this is the only place that turns a role into argv. The output is a JSON
+  # array so the runner bootstrap can carry it verbatim: an argv a manager
+  # retypes is an argv that loses a flag.
+  role_wanted="${1:-}"
+  [ -n "$role_wanted" ] ||
+    die 'usage: linchpin.sh role-command worker|reviewer|auditor --cwd DIR --prompt FILE [--resume SESSION] [--session ID] [--bootstrap PATH] [--config-dir DIR]'
+  shift
+  role_cwd=''
+  role_prompt=''
+  role_resume=''
+  role_session=''
+  role_bootstrap=''
+  role_config_dir="${LINCHPIN_CONFIG_DIR:-$PWD}"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --cwd) [ "$#" -ge 2 ] || die 'role-command --cwd needs a directory'; role_cwd="$2"; shift 2 ;;
+      --cwd=*) role_cwd="${1#--cwd=}"; shift ;;
+      --prompt) [ "$#" -ge 2 ] || die 'role-command --prompt needs a path'; role_prompt="$2"; shift 2 ;;
+      --prompt=*) role_prompt="${1#--prompt=}"; shift ;;
+      --resume) [ "$#" -ge 2 ] || die 'role-command --resume needs a session id'; role_resume="$2"; shift 2 ;;
+      --resume=*) role_resume="${1#--resume=}"; shift ;;
+      --session) [ "$#" -ge 2 ] || die 'role-command --session needs a session id'; role_session="$2"; shift 2 ;;
+      --session=*) role_session="${1#--session=}"; shift ;;
+      --bootstrap) [ "$#" -ge 2 ] || die 'role-command --bootstrap needs a path'; role_bootstrap="$2"; shift 2 ;;
+      --bootstrap=*) role_bootstrap="${1#--bootstrap=}"; shift ;;
+      --config-dir) [ "$#" -ge 2 ] || die 'role-command --config-dir needs a directory'; role_config_dir="$2"; shift 2 ;;
+      --config-dir=*) role_config_dir="${1#--config-dir=}"; shift ;;
+      *) die "unknown role-command option: $1" ;;
+    esac
+  done
+  case "$role_wanted" in
+    worker|reviewer|auditor) ;;
+    manager)
+      # The manager is the session already running this command. Inventing a
+      # launch for it is how a contract acquires a pin nothing can enforce.
+      die 'the manager is the current session, not a process this builds a command for: there is nothing to launch' ;;
+    *) die "no launch shape for role: $role_wanted (worker, reviewer, or auditor)" ;;
+  esac
+  [ -n "$role_cwd" ] || die "role-command $role_wanted --cwd DIR: a role started in the wrong directory commits to whichever one it lands in"
+  [ -d "$role_cwd" ] || die "role-command working directory does not exist: $role_cwd"
+  [ -n "$role_prompt" ] || die "role-command $role_wanted --prompt FILE: the prompt is a file written by brief/review-brief, never retyped"
+  require_file "$role_prompt"
+  command -v jq >/dev/null 2>&1 || die 'jq is required to emit a role command'
+
+  load_config "$role_config_dir"
+  runtime_metadata
+  if [ -n "$role_bootstrap" ]; then
+    # Same object preflight consumed. A launch derived from config while
+    # preflight verified a frozen role is the disconnect this closes.
+    require_file "$role_bootstrap"
+    role_frozen_provider=$(jq -r --arg r "$role_wanted" '.roles[$r].provider // ""' "$role_bootstrap")
+    role_frozen_model=$(jq -r --arg r "$role_wanted" '.roles[$r].model // ""' "$role_bootstrap")
+    role_frozen_effort=$(jq -r --arg r "$role_wanted" '.roles[$r].effort // ""' "$role_bootstrap")
+    if [ -n "$role_frozen_provider" ]; then
+      [ -n "$role_frozen_model" ] && [ -n "$role_frozen_effort" ] ||
+        die "bootstrap state froze an incomplete $role_wanted role: $role_bootstrap"
+    fi
+  else
+    role_frozen_provider=''
+    role_frozen_model=''
+    role_frozen_effort=''
+  fi
+  case "$role_wanted" in
+    worker) role_provider="$worker_provider"; role_model="$worker_model"; role_effort="$worker_effort" ;;
+    reviewer) role_provider="$reviewer_provider"; role_model="$reviewer_model"; role_effort="$reviewer_effort" ;;
+    auditor) role_provider="$auditor_provider"; role_model="$auditor_model"; role_effort="$auditor_effort" ;;
+  esac
+  if [ -n "$role_frozen_provider" ]; then
+    role_provider="$role_frozen_provider"
+    role_model="$role_frozen_model"
+    role_effort="$role_frozen_effort"
+  fi
+
+  # Write access belongs to exactly one role, for the reason references/runtime.md
+  # records: a worker cannot create a worktree commit under the default sandbox.
+  # Every other role reads.
+  case "$role_wanted" in
+    worker) role_sandbox=danger-full-access ;;
+    *) role_sandbox=read-only ;;
+  esac
+
+  role_stdin=''
+  case "$role_provider" in
+    codex)
+      role_codex="${LINCHPIN_CODEX_BIN:-codex}"
+      if [ -n "$role_resume" ]; then
+        # `exec resume` takes no --sandbox and no --model flag, so both travel
+        # as -c overrides. Dropping the model here is what let one worker
+        # identity record Luna/max, then Astra/medium, then Luna/max again
+        # across a single lane.
+        role_argv=$(jq -c -n --arg bin "$role_codex" --arg session "$role_resume" \
+          --arg sandbox "sandbox_mode=\"$role_sandbox\"" \
+          --arg model "model=\"$role_model\"" \
+          --arg effort "model_reasoning_effort=\"$role_effort\"" \
+          --arg cwd "$role_cwd" --rawfile prompt "$role_prompt" \
+          '[$bin, "exec", "resume", $session, "-c", $sandbox, "-c", $model, "-c", $effort, "-C", $cwd, $prompt]')
+      else
+        role_argv=$(jq -c -n --arg bin "$role_codex" --arg sandbox "$role_sandbox" \
+          --arg model "$role_model" \
+          --arg effort "model_reasoning_effort=\"$role_effort\"" \
+          --arg cwd "$role_cwd" --rawfile prompt "$role_prompt" \
+          '[$bin, "exec", "--sandbox", $sandbox, "--model", $model, "-c", $effort, "-C", $cwd, $prompt]')
+      fi
+      ;;
+    claude)
+      role_claude="${LINCHPIN_CLAUDE_BIN:-claude}"
+      # Claude Code reads its prompt from stdin, so the packet is never an
+      # argument and never shell-escaped by hand.
+      role_stdin="$role_prompt"
+      if [ -n "$role_resume" ]; then
+        role_argv=$(jq -c -n --arg bin "$role_claude" --arg session "$role_resume" \
+          --arg model "$role_model" --arg effort "$role_effort" \
+          '[$bin, "--resume", $session, "-p", "--model", $model, "--effort", $effort]')
+      elif [ "$role_wanted" = worker ]; then
+        [ -n "$role_session" ] ||
+          die 'a claude worker needs --session ID: the id is generated before the lane starts so the ledger records it rather than scraping it out of output'
+        role_argv=$(jq -c -n --arg bin "$role_claude" --arg model "$role_model" \
+          --arg effort "$role_effort" --arg session "$role_session" \
+          '[$bin, "-p", "--permission-mode", "bypassPermissions", "--model", $model, "--effort", $effort, "--session-id", $session]')
+      else
+        [ -n "$role_session" ] ||
+          die "a claude $role_wanted needs --session ID: the id is generated before launch so the ledger records which session produced the verdict"
+        role_argv=$(jq -c -n --arg bin "$role_claude" --arg model "$role_model" \
+          --arg effort "$role_effort" --arg session "$role_session" \
+          '[$bin, "-p", "--permission-mode", "plan", "--disallowed-tools", "Edit Write NotebookEdit", "--model", $model, "--effort", $effort, "--session-id", $session]')
+      fi
+      ;;
+    *) die "no invocation shape for provider '$role_provider' in role '$role_wanted'" ;;
+  esac
+
+  printf 'ROLE-COMMAND role=%s provider=%s model=%s effort=%s sandbox=%s cwd=%s prompt=%s%s\n' \
+    "$role_wanted" "$role_provider" "$role_model" "$role_effort" "$role_sandbox" \
+    "$role_cwd" "$role_prompt" \
+    "$(if [ -n "$role_resume" ]; then printf ' resume=%s' "$role_resume"; fi)"
+  [ -z "$role_stdin" ] || printf 'STDIN %s\n' "$role_stdin"
+  printf 'ARGV %s\n' "$role_argv"
 }
 
 workspace_ignore_one() {
@@ -2961,6 +3218,29 @@ run_ledger_block() {
       split_at = index(entry, ":")
       print substr(entry, 1, split_at - 1) "\t" trim(substr(entry, split_at + 1))
     }
+  ' "$1"
+}
+
+run_ledger_prd_rounds() {
+  # Every `- lane<TAB>rounds` pair for lanes whose `prd` field is $2. The budget
+  # is spent by the work, not by the name a manager gave this attempt at it.
+  awk -v target="$2" '
+    function trim(value) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      return value
+    }
+    function flush() {
+      if (lane != "" && prd == target) print lane "\t" (rounds == "" ? 0 : rounds)
+      lane = ""; prd = ""; rounds = ""
+    }
+    /^## / {
+      flush()
+      if ($0 ~ /^## Lane: /) lane = trim(substr($0, 10))
+      next
+    }
+    lane != "" && /^- prd:/ { prd = trim(substr($0, index($0, ":") + 1)) }
+    lane != "" && /^- review_rounds:/ { rounds = trim(substr($0, index($0, ":") + 1)) }
+    END { flush() }
   ' "$1"
 }
 
@@ -3435,14 +3715,24 @@ linchpin.sh COMMAND [ARGS]
         --wait blocks inside the runner until a state change, a terminal state,
         or the timeout. A timeout prints EVENTS-HEARTBEAT: a heartbeat, not a
         question to reason about
+        a run reaches complete only when every lane exited zero, every required
+        gate in the bootstrap ran and passed, and an eligible batch has its audit
+        receipt; a nonzero lane exit blocks, and a missing audit is awaiting_audit
+  audit-receipt RUN_ID --session ID --verdict pass|fail  close the audit checkpoint
+        [--repo DIR] [--evidence PATH] [--extend]
+        the receipt names the auditor session, so a recorded audit is checkable
+        one audit per batch; a second needs --extend, and a fail verdict blocks
   gate PRD REPORT                                    check observed-red evidence
   audit PRD... [--mode on|off|auto] [--out PATH]      say whether this batch is audited
         [--assess PRD=SCORE:FACTORS] [--config-dir DIR]
+        [--auditor ALIAS] [--auditor-effort EFFORT]
         mode precedence: this run's --mode, then .linchpin.toml, then auto
         auto audits a batch holding at least one HIGH (score 7+) PRD
         a PRD with no usable complexity declaration exits 3 with
         BOOTSTRAP-NEEDS-COMPLEXITY; assess it with the creator rubric and pass
         --assess PRD=SCORE:FACTORS. --out freezes the decision as bootstrap JSON
+        with every resolved role under .roles; --auditor/--auditor-effort set a
+        run-local auditor there and never touch .linchpin.toml
   assign "TEXT" [--config-dir DIR] [--write]         read role/model/effort out of a sentence
         role words: executor|worker|implementer|builder, reviewer|review|critic
         prints one ASSIGN line per role; --write updates .linchpin.toml in place
@@ -3467,6 +3757,14 @@ linchpin.sh COMMAND [ARGS]
         --cwd starts the lane inside its worktree and --stdin feeds the brief on
         stdin; a claude role needs both, a codex role needs neither
   await PIDFILE... [--interval S] [--timeout S]      block until a group's lanes exit
+  role-command ROLE --cwd DIR --prompt FILE           emit one role's exact argv
+        [--resume SESSION] [--session ID] [--bootstrap PATH] [--config-dir DIR]
+        ROLE is worker, reviewer, or auditor; the manager is the current session
+        prints ROLE-COMMAND (provider, model, effort, enforced sandbox), ARGV as
+        JSON, and STDIN for providers that read their prompt there
+        the sandbox belongs to the role: worker writes, reviewer and auditor read
+        --resume carries the model and effort, not only the sandbox
+        --bootstrap uses the roles preflight verified rather than re-deriving them
   preflight [MODELS_CACHE.json]                      check every role's model
         [--bootstrap PATH] [--audit-eligible yes|no]
         codex roles by cache lookup, claude roles by one live probe
@@ -3552,6 +3850,12 @@ case "$command_name" in
     esac
     ;;
   events) [ "$#" -ge 1 ] || die 'usage: linchpin.sh events RUN_ID [--repo DIR] [--after N] [--wait] [--timeout S]'; sh "$script_dir/runner.sh" events "$@" ;;
+  audit-receipt)
+    [ "$#" -ge 1 ] || die 'usage: linchpin.sh audit-receipt RUN_ID --session ID --verdict pass|fail [--repo DIR] [--evidence PATH] [--extend]'
+    sh "$script_dir/runner.sh" audit-receipt "$@" ;;
   preflight) preflight_model "$@" ;;
+  role-command)
+    [ "$#" -ge 1 ] || die 'usage: linchpin.sh role-command worker|reviewer|auditor --cwd DIR --prompt FILE [--resume SESSION] [--session ID] [--bootstrap PATH] [--config-dir DIR]'
+    role_command "$@" ;;
   *) usage >&2; exit 1 ;;
 esac

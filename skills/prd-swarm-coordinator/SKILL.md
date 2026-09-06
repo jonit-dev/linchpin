@@ -61,7 +61,8 @@ Resolve the audit decision in the same breath, before `preflight`, because
 preflight checks the auditor only for a run that will use one:
 
 ```sh
-sh $S audit <prd>... [--mode <mode from ASSIGN-AUDIT>] --config-dir "$REPO" --out "$REPO/.linchpin/bootstrap-$TS.json"
+sh $S audit <prd>... [--mode <mode from ASSIGN-AUDIT>] [--auditor <alias> --auditor-effort <effort>] \
+  --config-dir "$REPO" --out "$REPO/.linchpin/bootstrap-$TS.json"
 sh $S preflight --bootstrap "$REPO/.linchpin/bootstrap-$TS.json"
 ```
 
@@ -69,7 +70,13 @@ Exit `3` with `BOOTSTRAP-NEEDS-COMPLEXITY` is yours to resolve: score that PRD
 with the creator rubric and pass `--assess <path>=SCORE:FACTORS`. Do not edit
 the PRD, and do not ask the user to classify routine work. `ASSIGN-AUDIT` and
 any `scope=run-local` auditor line are run-local — carry them here, never into
-`.linchpin.toml`.
+`.linchpin.toml`. `assign` prints the exact flags for the second of those as
+`ASSIGN-RUN-LOCAL audit --auditor <alias> --auditor-effort <effort>`; paste them
+into the `audit` call above. That is the only path a run-local selection has:
+`--out` freezes every resolved role into `.roles`, and `preflight --bootstrap`
+and `role-command --bootstrap` both read that object rather than re-deriving one
+from config. Carrying it any other way means preflighting one auditor and
+launching another.
 
 ## Per-group mode selection
 
@@ -101,28 +108,49 @@ sh $S worktree "$REPO" "$SLUG" "$BASE" \
   && sh $S lane "$L" "$LANE" --set state=RUNNING --set prd="$PRD" --set branch="linchpin/$SLUG"
 ```
 
-Then read `Worker provider:` out of the brief and launch that provider's shape.
-**codex** takes the lane with `-C` and the brief as an argument:
+## Never assemble a role command by hand
+
+`role-command` turns a role into argv, and it is the only thing that does:
 
 ```sh
-sh $S launch --pid "$REPO/.linchpin/$LANE.pid" --log "$REPO/.linchpin/$LANE.log" \
-  -- codex exec --sandbox danger-full-access \
-     --model <Worker.Model> -c 'model_reasoning_effort="<Worker.Effort>"' \
-     -C "$REPO/.worktrees/$SLUG" "$(cat "$REPO/.linchpin/$LANE.brief")"
+sh $S role-command worker --cwd "$REPO/.worktrees/$SLUG" \
+  --prompt "$REPO/.linchpin/$LANE.brief" --bootstrap "$REPO/.linchpin/bootstrap-$TS.json"
+# -> ROLE-COMMAND role=worker provider=codex model=... effort=... sandbox=danger-full-access ...
+# -> ARGV ["codex","exec","--sandbox","danger-full-access",...]
 ```
 
-**claude** has no `-C` and reads its prompt from stdin, so the lane is the
-process cwd and the brief is a file. Generate the session id *before* launch and
-record it, so a continuation is possible even if the process dies:
+It prints a `ROLE-COMMAND` line naming the resolved provider, model, effort, and
+enforced sandbox, an `ARGV` line holding the exact JSON argv, and a `STDIN` line
+for providers that read their prompt there. Feed the argv to `launch`, or put it
+straight into a bootstrap lane's `command`. Read `--bootstrap` in every call, so
+the launch uses the roles preflight verified rather than a second derivation of
+them.
+
+The sandbox is a property of the role, not of the prompt. The worker gets
+`danger-full-access`; the reviewer and the auditor get `read-only`, and there is
+no flag that changes that. **Every role runs as a subprocess.** Never start one
+through a native subagent mechanism — `references/runtime.md` names the exact
+forbidden terms under Delegation rules, and `scripts/verify.sh` fails when any
+of them appears in a skill. One field manager launched three auditors natively:
+every prompt said read-only and every enforced sandbox said full access, because
+a native child inherits the parent's context instead of taking its own. A
+read-only instruction inside a prompt is not a read-only process.
+
+A claude role needs its session id generated *before* launch and recorded, so a
+continuation is possible even if the process dies:
 
 ```sh
 SID=$(uuidgen)
-sh $S lane "$L" "$LANE" --set session="$SID" \
-  && sh $S launch --pid "$REPO/.linchpin/$LANE.pid" --log "$REPO/.linchpin/$LANE.log" \
-     --cwd "$REPO/.worktrees/$SLUG" --stdin "$REPO/.linchpin/$LANE.brief" \
-     -- claude -p --permission-mode bypassPermissions \
-        --model <Worker.Model> --effort <Worker.Effort> --session-id "$SID"
+sh $S lane "$L" "$LANE" --set session="$SID"
+sh $S role-command worker --session "$SID" --cwd "$REPO/.worktrees/$SLUG" \
+  --prompt "$REPO/.linchpin/$LANE.brief" --bootstrap "$REPO/.linchpin/bootstrap-$TS.json"
 ```
+
+Continue a lane with `--resume <session-id>` on the same command. It carries the
+model and the effort explicitly, not only the sandbox: one field worker identity
+recorded Luna/max, then Astra/medium across implementation and commits, then
+Luna/max again, because the documented resume shape pinned a sandbox and left
+the model to whatever the session picked up.
 
 Use `--cwd`; never a `cd &&` string. A claude lane started where you stood
 commits to the wrong repository.
@@ -184,7 +212,8 @@ sh $S events <id> --repo "$REPO" --after <cursor> --wait
 ```
 
 The bootstrap file is the plan you already resolved — repo, base, delivery,
-`max_lanes`, the frozen audit decision, the gate argv, and one entry per lane
+`max_lanes`, the frozen audit decision, the frozen `roles`, the gate argv (each
+`{"id":..., "command":[...], "required":true}`, or a bare argv array), and one entry per lane
 carrying its PRD, its working directory, its brief on stdin where the provider
 needs it there, and its exact command argv. The runner refuses an incomplete one
 rather than guessing a command; that refusal is the point, because a guessed
@@ -198,12 +227,37 @@ the run reaches a terminal state, or the timeout. Read what comes back:
   there is nothing to decide, and the correct next action is the same call
   again. Do not read a log, do not summarise the wait, do not announce progress
   that did not happen.
-- `EVENTS-TERMINAL` — the run is `complete` or `blocked`. Go read the state.
+- `EVENTS-TERMINAL` — the run reached `complete`, `blocked`, or
+  `awaiting_audit`. Go read the state. `awaiting_audit` is terminal for the
+  waiter and not for the run: the supervisor has nothing left to do and the next
+  move is yours.
 - `decision_required` — the only event that is genuinely yours. Something needs
   a semantic call: a lane that crashed inside its launch window, an operation
   whose provider session left no exit receipt. The runner will not relaunch out
   of that window, and neither should you: reconcile the provider session first.
   A duplicate paid call is worse than a run that stopped and said what it needs.
+
+`complete` is a claim about readiness, not about processes, so the runner will
+not say it until it can. In order: every lane exited zero — a lane that exited
+nonzero is `PARTIAL`, which is unfinished work and blocks the run; then the
+bootstrap's own `gates` are executed, once, with each exit code and log recorded
+under `evidence/gates/`, and a required failure blocks; then, for an
+audit-eligible batch, the run stops at `awaiting_audit` until an audit is
+receipted:
+
+```sh
+sh $S role-command auditor --cwd "$REPO" --prompt "$REPO/.linchpin/audit.md" \
+  --bootstrap "$REPO/.linchpin/bootstrap-$TS.json"
+# launch that argv, read its verdict, then close the checkpoint:
+sh $S audit-receipt <run-id> --repo "$REPO" --session <auditor-session-id> \
+  --verdict pass|fail [--evidence <path>]
+```
+
+The receipt names the session that produced it, so "an auditor ran" is checkable
+rather than remembered. One audit per batch: a second is refused unless you pass
+`--extend` to say you are deliberately spending another. A `fail` verdict blocks
+the run. Twelve saved field states said `complete` with zero audit attempts and
+an unexecuted gate list; this is what stops that reading as delivered.
 
 `run --resume <id>` reconnects. Two resumes cannot launch the same paid
 operation twice — the second finds the first still running and says

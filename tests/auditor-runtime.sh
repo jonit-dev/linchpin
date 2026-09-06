@@ -37,7 +37,7 @@ assert_contains "$zero" 'no capability check, probe, or launch for this run'
 
 # An eligible run checks it, and says which model it checked.
 eligible=$(env LINCHPIN_CONFIG_DIR="$config_dir" sh "$linchpin" preflight "$cache" --audit-eligible yes)
-assert_contains "$eligible" 'auditor[provider=codex model=gpt-6-astra mechanism=codex exec --sandbox read-only'
+assert_contains "$eligible" 'auditor[provider=codex model=gpt-6-astra effort=medium mechanism=codex exec --sandbox read-only'
 assert_contains "$eligible" "verified=cache=$cache"
 
 # The frozen decision drives it, not a second reading of the PRD: preflight and

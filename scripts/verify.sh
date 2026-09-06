@@ -70,13 +70,18 @@ fi
 
 skill_files=$(find "$repo_root/skills" -type f -name '*.md' -print)
 
+# `agent_type` and `fork_turns` were the whole list, and they did not name the
+# call one field manager actually made: `multi_agent_v1__spawn_agent` with
+# `fork_context: true`, which launched three auditors that inherited the
+# parent's `danger-full-access` context while their prompts said read-only.
+# A rule enforced against two spellings of a mechanism is not enforced.
 native_hits=$(printf '%s\n' "$skill_files" | while IFS= read -r skill; do
   [ -n "$skill" ] || continue
-  grep -nE 'agent_type|fork_turns' "$skill" | sed "s#^#$skill:#"
+  grep -nE 'agent_type|fork_turns|fork_context|spawn_agent|multi_agent_v[0-9]' "$skill" | sed "s#^#$skill:#"
 done || true)
 if [ -n "$native_hits" ]; then
   printf '%s\n' "$native_hits" >&2
-  fail 'native subagent terms are present in a skill; Luna must use codex exec'
+  fail 'native subagent terms are present in a skill; every role runs as a subprocess with its own sandbox'
 fi
 
 # A Claude id pasted into a skill body is the same stale pin a codex slug is.
